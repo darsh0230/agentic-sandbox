@@ -2,7 +2,10 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   running: false,
+  uploads: [],
 };
+
+const maxUploadBytes = 24 * 1024 * 1024;
 
 const defaults = {
   command: "pi --workspace /home/agent --input /home/agent/input/task.md",
@@ -16,6 +19,9 @@ function init() {
   $("token").value = localStorage.getItem("piSandboxToken") || "";
   $("healthBtn").addEventListener("click", checkHealth);
   $("clearBtn").addEventListener("click", clearOutput);
+  $("clearUploadsBtn").addEventListener("click", clearUploads);
+  $("fileUpload").addEventListener("change", () => addUploads($("fileUpload").files, false));
+  $("folderUpload").addEventListener("change", () => addUploads($("folderUpload").files, true));
   $("runForm").addEventListener("submit", runAgent);
   for (const input of document.querySelectorAll("input, textarea, select")) {
     input.addEventListener("input", updatePreview);
@@ -47,7 +53,7 @@ function setHealth(kind, text, detail) {
   $("healthDetail").textContent = detail;
 }
 
-function buildRequest() {
+function buildRequest(injectedFiles = []) {
   const collectPaths = $("collectPaths").value.split("\n").map((line) => line.trim()).filter(Boolean);
   const resultFile = $("resultFile").value.trim();
   return {
@@ -57,7 +63,7 @@ function buildRequest() {
       relative_path: "input/task.md",
       content_utf8: $("task").value,
       mode: 420,
-    }],
+    }, ...injectedFiles],
     injected_readonly_dirs: [],
     env: [],
     timeout_ms: Number($("timeoutMs").value || 300000),
@@ -75,7 +81,12 @@ function buildRequest() {
 
 function updatePreview() {
   try {
-    $("requestPreview").textContent = JSON.stringify(buildRequest(), null, 2);
+    const previewFiles = state.uploads.map((upload) => ({
+      relative_path: upload.relativePath,
+      content: `<${upload.file.size} bytes from ${upload.displayName}>`,
+      mode: 420,
+    }));
+    $("requestPreview").textContent = JSON.stringify(buildRequest(previewFiles), null, 2);
   } catch (error) {
     $("requestPreview").textContent = error.message;
   }
@@ -91,13 +102,14 @@ async function runAgent(event) {
   appendEvent("client", "Submitting run request");
 
   try {
+    const uploadedFiles = await readInjectedUploads();
     const response = await fetch("/api/run", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...authHeaders(),
       },
-      body: JSON.stringify(buildRequest()),
+      body: JSON.stringify(buildRequest(uploadedFiles)),
     });
     if (!response.ok) throw new Error(await response.text());
     await readNdjson(response.body);
@@ -108,6 +120,61 @@ async function runAgent(event) {
     $("runBtn").disabled = false;
     $("runBtn").textContent = "Run Agent";
   }
+}
+
+function addUploads(files, preserveFolderPath) {
+  const prefix = normalizeRelativePath($("uploadPrefix").value.trim());
+  for (const file of files || []) {
+    if (!file.name) continue;
+    const sourcePath = preserveFolderPath ? file.webkitRelativePath || file.name : file.name;
+    const relativePath = joinRelativePath(prefix, sourcePath);
+    state.uploads.push({ file, relativePath, displayName: sourcePath });
+  }
+  $("fileUpload").value = "";
+  $("folderUpload").value = "";
+  renderUploads();
+  updatePreview();
+}
+
+function clearUploads() {
+  state.uploads = [];
+  $("fileUpload").value = "";
+  $("folderUpload").value = "";
+  renderUploads();
+  updatePreview();
+}
+
+function renderUploads() {
+  if (!state.uploads.length) {
+    $("uploadList").textContent = "No extra files selected.";
+    return;
+  }
+  const totalBytes = state.uploads.reduce((sum, upload) => sum + upload.file.size, 0);
+  const lines = state.uploads.map((upload) => `${upload.relativePath} (${formatBytes(upload.file.size)})`);
+  $("uploadList").textContent = `${state.uploads.length} file(s), ${formatBytes(totalBytes)} total\n${lines.join("\n")}`;
+}
+
+async function readInjectedUploads() {
+  const seen = new Set(["input/task.md"]);
+  const totalBytes = state.uploads.reduce((sum, upload) => sum + upload.file.size, 0);
+  if (totalBytes > maxUploadBytes) {
+    throw new Error(`Selected uploads are ${formatBytes(totalBytes)}; limit is ${formatBytes(maxUploadBytes)} for the JSON UI path.`);
+  }
+
+  const injected = [];
+  for (const upload of state.uploads) {
+    validateRelativePath(upload.relativePath);
+    if (seen.has(upload.relativePath)) {
+      throw new Error(`Duplicate injected path: ${upload.relativePath}`);
+    }
+    seen.add(upload.relativePath);
+    injected.push({
+      relative_path: upload.relativePath,
+      content: Array.from(new Uint8Array(await upload.file.arrayBuffer())),
+      mode: 420,
+    });
+  }
+  return injected;
 }
 
 async function readNdjson(body) {
@@ -226,6 +293,30 @@ function shellWords(input) {
   if (current) words.push(current);
   if (!words.length) throw new Error("Command is required");
   return words;
+}
+
+function joinRelativePath(prefix, path) {
+  const pieces = [prefix, path].filter(Boolean).join("/");
+  return normalizeRelativePath(pieces);
+}
+
+function normalizeRelativePath(path) {
+  return path.replaceAll("\\", "/").split("/").filter((part) => part && part !== ".").join("/");
+}
+
+function validateRelativePath(path) {
+  if (!path || path.startsWith("/") || path.includes("\0")) {
+    throw new Error(`Invalid injected path: ${path}`);
+  }
+  for (const part of path.split("/")) {
+    if (part === "..") throw new Error(`Injected path cannot escape workspace: ${path}`);
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
 init();

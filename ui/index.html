@@ -57,6 +57,34 @@
             <textarea id="task" rows="7" spellcheck="true"></textarea>
           </label>
 
+          <section class="upload-box" aria-labelledby="uploadTitle">
+            <div class="row-title compact-title">
+              <div>
+                <p class="eyebrow">workspace files</p>
+                <h3 id="uploadTitle">Add Files Or Folders</h3>
+              </div>
+              <button id="clearUploadsBtn" type="button">Clear</button>
+            </div>
+
+            <label>
+              Destination under <code>/home/agent</code>
+              <input id="uploadPrefix" value="input" spellcheck="false" placeholder="input, project/src, or blank for workspace root" />
+            </label>
+
+            <div class="split">
+              <label class="file-picker">
+                Add files
+                <input id="fileUpload" type="file" multiple />
+              </label>
+              <label class="file-picker">
+                Add folder
+                <input id="folderUpload" type="file" multiple webkitdirectory directory />
+              </label>
+            </div>
+
+            <div id="uploadList" class="upload-list muted">No extra files selected.</div>
+          </section>
+
           <label>
             Collect paths, one per line
             <textarea id="collectPaths" rows="3" spellcheck="false">output/result.txt

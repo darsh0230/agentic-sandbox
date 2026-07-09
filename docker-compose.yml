@@ -1,0 +1,42 @@
+services:
+  pi-sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pi-sandbox:dev
+    container_name: pi-sandbox
+    networks:
+      - pi-sandbox-net
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+      - SETPCAP
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - KILL
+    security_opt:
+      - seccomp=unconfined
+    tmpfs:
+      - /run:rw,nosuid,nodev,size=64m
+      - /tmp:rw,nosuid,nodev,size=256m
+    volumes:
+      - pi-sandbox-state:/var/lib/pi-sandbox
+    environment:
+      RUST_LOG: info
+      PI_SANDBOX_ROOT: /var/lib/pi-sandbox
+    command:
+      - /usr/local/bin/pi-sandbox-master
+      - serve
+      - --config
+      - /etc/pi-sandbox/config.toml
+
+networks:
+  pi-sandbox-net:
+    driver: bridge
+
+volumes:
+  pi-sandbox-state:

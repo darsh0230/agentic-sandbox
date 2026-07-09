@@ -1,4 +1,5 @@
 pub mod events;
+pub mod http;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,7 +87,7 @@ async fn handle_client(stream: UnixStream, master: Arc<Master>) -> Result<()> {
                     write_json_line(
                         &mut writer,
                         &ApiResponse::Error {
-                            message: err.to_string(),
+                            message: format!("{err:#}"),
                         },
                     )
                     .await?

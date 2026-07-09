@@ -23,16 +23,21 @@ services:
     tmpfs:
       - /run:rw,nosuid,nodev,size=64m
       - /tmp:rw,nosuid,nodev,size=256m
+    ports:
+      - 127.0.0.1:8080:8080
     volumes:
       - pi-sandbox-state:/var/lib/pi-sandbox
     environment:
       RUST_LOG: info
       PI_SANDBOX_ROOT: /var/lib/pi-sandbox
+      PI_SANDBOX_HTTP_TOKEN: change-me-dev-token
     command:
       - /usr/local/bin/pi-sandbox-master
       - serve
       - --config
       - /etc/pi-sandbox/config.toml
+      - --http
+      - 0.0.0.0:8080
 
 networks:
   pi-sandbox-net:

@@ -26,15 +26,16 @@ pub fn build_rootfs(config: &crate::sandbox::SandboxLaunchConfig) -> Result<Path
     ] {
         fs::create_dir_all(root.join(dir))?;
     }
-    crate::sandbox::mounts::bind_rw(&root, &root, false)?;
+    crate::sandbox::mounts::bind_rw(&root, &root, false).context("bind rootfs onto itself")?;
 
-    bind_ro_or_symlink(Path::new("/usr"), &root.join("usr"), true)?;
+    bind_ro_or_symlink(Path::new("/usr"), &root.join("usr"), true).context("bind /usr")?;
     for path in ["/bin", "/sbin", "/lib", "/lib64"] {
         bind_ro_or_symlink(
             Path::new(path),
             &root.join(path.trim_start_matches('/')),
             true,
         )
+        .with_context(|| format!("bind or symlink {path}"))
         .ok();
     }
 
@@ -44,39 +45,50 @@ pub fn build_rootfs(config: &crate::sandbox::SandboxLaunchConfig) -> Result<Path
         &root.join("etc/resolv.conf"),
         false,
         false,
-    )?;
-    bind_if_exists(Path::new("/etc/ssl"), &root.join("etc/ssl"), true, false).ok();
+    )
+    .context("bind /etc/resolv.conf")?;
+    bind_if_exists(Path::new("/etc/ssl"), &root.join("etc/ssl"), true, false)
+        .context("bind /etc/ssl")
+        .ok();
     bind_if_exists(
         Path::new("/etc/ca-certificates"),
         &root.join("etc/ca-certificates"),
         true,
         false,
     )
+    .context("bind /etc/ca-certificates")
     .ok();
 
-    crate::sandbox::mounts::mount_tmpfs(&root.join("tmp"), "mode=1777,nosuid,nodev")?;
-    crate::sandbox::mounts::mount_tmpfs(&root.join("var/tmp"), "mode=1777,nosuid,nodev")?;
-    crate::sandbox::mounts::mount_tmpfs(&root.join("run"), "mode=0755,nosuid,nodev,noexec")?;
-    crate::sandbox::mounts::mount_tmpfs(&root.join("dev/shm"), "mode=1777,nosuid,nodev,noexec")?;
+    crate::sandbox::mounts::mount_tmpfs(&root.join("tmp"), "mode=1777,nosuid,nodev")
+        .context("mount tmpfs /tmp")?;
+    crate::sandbox::mounts::mount_tmpfs(&root.join("var/tmp"), "mode=1777,nosuid,nodev")
+        .context("mount tmpfs /var/tmp")?;
+    crate::sandbox::mounts::mount_tmpfs(&root.join("run"), "mode=0755,nosuid,nodev,noexec")
+        .context("mount tmpfs /run")?;
+    crate::sandbox::mounts::mount_tmpfs(&root.join("dev/shm"), "mode=1777,nosuid,nodev,noexec")
+        .context("mount tmpfs /dev/shm")?;
 
     for dev in ["null", "zero", "random", "urandom"] {
         let dst = root.join("dev").join(dev);
         fs::File::create(&dst)?;
-        crate::sandbox::mounts::bind_rw(&Path::new("/dev").join(dev), &dst, false)?;
+        crate::sandbox::mounts::bind_rw(&Path::new("/dev").join(dev), &dst, false)
+            .with_context(|| format!("bind /dev/{dev}"))?;
     }
     symlink("/proc/self/fd", root.join("dev/fd")).ok();
     symlink("/proc/self/fd/0", root.join("dev/stdin")).ok();
     symlink("/proc/self/fd/1", root.join("dev/stdout")).ok();
     symlink("/proc/self/fd/2", root.join("dev/stderr")).ok();
 
-    crate::sandbox::mounts::bind_rw(&config.slot.workspace_path, &root.join("home/agent"), true)?;
+    crate::sandbox::mounts::bind_rw(&config.slot.workspace_path, &root.join("home/agent"), true)
+        .context("bind workspace to /home/agent")?;
     symlink("/home/agent", root.join("workspace")).ok();
 
     for dir in &config.injected_readonly_dirs {
         let relative = dir.sandbox_path.trim_start_matches('/');
         let dst = root.join(relative);
         fs::create_dir_all(&dst)?;
-        crate::sandbox::mounts::bind_ro(Path::new(&dir.source_path), &dst, true, false)?;
+        crate::sandbox::mounts::bind_ro(Path::new(&dir.source_path), &dst, true, false)
+            .with_context(|| format!("bind readonly resource {}", dir.source_path))?;
     }
     Ok(root)
 }

@@ -46,13 +46,23 @@ pub fn bind_rw(src: &Path, dst: &Path, recursive: bool) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn mount_tmpfs(dst: &Path, options: &str) -> Result<()> {
-    mount(
-        Some("tmpfs"),
-        dst,
-        Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        Some(options),
-    )?;
+    let mut flags = MsFlags::empty();
+    let mut data = Vec::new();
+    for option in options.split(',').filter(|option| !option.is_empty()) {
+        match option {
+            "nosuid" => flags |= MsFlags::MS_NOSUID,
+            "nodev" => flags |= MsFlags::MS_NODEV,
+            "noexec" => flags |= MsFlags::MS_NOEXEC,
+            other => data.push(other),
+        }
+    }
+    let data = data.join(",");
+    let data = if data.is_empty() {
+        None
+    } else {
+        Some(data.as_str())
+    };
+    mount(Some("tmpfs"), dst, Some("tmpfs"), flags, data)?;
     Ok(())
 }
 

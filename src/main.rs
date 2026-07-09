@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -28,6 +29,10 @@ enum Command {
         socket: PathBuf,
         #[arg(long)]
         config: Option<PathBuf>,
+        #[arg(long, env = "PI_SANDBOX_HTTP_ADDR")]
+        http: Option<SocketAddr>,
+        #[arg(long, env = "PI_SANDBOX_HTTP_TOKEN")]
+        http_token: Option<String>,
     },
     RunJson {
         #[arg(long, env = "PI_SANDBOX_ROOT", default_value = "/var/lib/pi-sandbox")]
@@ -48,12 +53,22 @@ async fn main() -> Result<()> {
             slots,
             socket,
             config,
+            http,
+            http_token,
         } => {
             if let Some(path) = config {
                 info!(config = %path.display(), "config file argument accepted for packaging compatibility");
             }
             let master = Master::new(root, slots).await?;
-            api::serve_unix(socket, master).await
+            if let Some(addr) = http {
+                let http_master = master.clone();
+                tokio::select! {
+                    result = api::serve_unix(socket, master) => result,
+                    result = api::http::serve_http(api::http::HttpConfig { addr, token: http_token }, http_master) => result,
+                }
+            } else {
+                api::serve_unix(socket, master).await
+            }
         }
         Command::RunJson { root, request } => {
             let body = tokio::fs::read(&request).await?;

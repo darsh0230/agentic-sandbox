@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pi Sandbox Control</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero" aria-labelledby="title">
+        <div>
+          <p class="eyebrow">single-container isolation console</p>
+          <h1 id="title">Pi Sandbox Control</h1>
+          <p class="lede">Launch a Pi agent into a private workspace, stream its output, and collect artifacts without exposing a browser-reachable control socket to sandboxes.</p>
+        </div>
+        <div class="status-card" aria-live="polite">
+          <span class="status-light" id="statusLight"></span>
+          <div>
+            <strong id="healthText">Not checked</strong>
+            <small id="healthDetail">HTTP API status</small>
+          </div>
+          <button id="healthBtn" type="button">Check</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <form id="runForm" class="panel control-panel">
+          <div class="panel-title">
+            <p class="eyebrow">run request</p>
+            <h2>Agent Launch</h2>
+          </div>
+
+          <label>
+            Bearer token
+            <input id="token" autocomplete="off" spellcheck="false" placeholder="PI_SANDBOX_HTTP_TOKEN" />
+          </label>
+
+          <div class="split">
+            <label>
+              Run ID
+              <input id="runId" required />
+            </label>
+            <label>
+              Timeout ms
+              <input id="timeoutMs" type="number" min="1000" step="1000" value="300000" />
+            </label>
+          </div>
+
+          <label>
+            Command
+            <textarea id="command" rows="4" spellcheck="false"></textarea>
+          </label>
+
+          <label>
+            Injected task file: <code>input/task.md</code>
+            <textarea id="task" rows="7" spellcheck="true"></textarea>
+          </label>
+
+          <label>
+            Collect paths, one per line
+            <textarea id="collectPaths" rows="3" spellcheck="false">output/result.txt
+.pi/result.json</textarea>
+          </label>
+
+          <div class="split">
+            <label>
+              Result JSON file
+              <input id="resultFile" value=".pi/result.json" spellcheck="false" />
+            </label>
+            <label>
+              Cleanup
+              <select id="cleanupPolicy">
+                <option value="DeleteWorkspaceAfterRun">Delete after run</option>
+                <option value="PreserveWorkspaceOnFailure">Preserve on failure</option>
+                <option value="PreserveWorkspaceForDebug">Preserve always</option>
+              </select>
+            </label>
+          </div>
+
+          <details>
+            <summary>Advanced JSON preview</summary>
+            <pre id="requestPreview" class="code-block"></pre>
+          </details>
+
+          <button id="runBtn" class="primary" type="submit">Run Agent</button>
+        </form>
+
+        <section class="panel output-panel" aria-labelledby="outputTitle">
+          <div class="panel-title row-title">
+            <div>
+              <p class="eyebrow">live stream</p>
+              <h2 id="outputTitle">Run Output</h2>
+            </div>
+            <button id="clearBtn" type="button">Clear</button>
+          </div>
+
+          <div id="timeline" class="timeline" aria-live="polite"></div>
+
+          <div class="result-grid">
+            <article>
+              <h3>Result JSON</h3>
+              <pre id="resultJson" class="code-block muted">No result yet.</pre>
+            </article>
+            <article>
+              <h3>Collected Files</h3>
+              <div id="files" class="files muted">No files collected yet.</div>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

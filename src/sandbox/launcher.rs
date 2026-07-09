@@ -32,8 +32,19 @@ impl SandboxLauncher {
             command.env(key, value);
         }
 
-        configure_platform(&mut command, config)?;
-        let mut child = command.spawn()?;
+        let setup_error_path = config
+            .root
+            .join("state")
+            .join(format!("{}.setup-error", config.run_id));
+        let _ = std::fs::remove_file(&setup_error_path);
+        configure_platform(&mut command, config, setup_error_path.clone())?;
+        let mut child = command.spawn().map_err(|err| {
+            if let Ok(details) = std::fs::read_to_string(&setup_error_path) {
+                anyhow::anyhow!("{err}: {details}")
+            } else {
+                anyhow::anyhow!(err)
+            }
+        })?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let (tx, output_rx) = mpsc::channel(64);
@@ -120,18 +131,29 @@ fn exit_status_from(status: std::process::ExitStatus) -> ExitStatus {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_platform(command: &mut Command, config: SandboxLaunchConfig) -> Result<()> {
+fn configure_platform(
+    command: &mut Command,
+    config: SandboxLaunchConfig,
+    setup_error_path: std::path::PathBuf,
+) -> Result<()> {
     unsafe {
         command.pre_exec(move || {
-            crate::sandbox::init::prepare_and_drop(&config)
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))
+            crate::sandbox::init::prepare_and_drop(&config).map_err(|err| {
+                let message = format!("{err:#}");
+                let _ = std::fs::write(&setup_error_path, &message);
+                std::io::Error::new(std::io::ErrorKind::Other, message)
+            })
         });
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn configure_platform(command: &mut Command, config: SandboxLaunchConfig) -> Result<()> {
+fn configure_platform(
+    command: &mut Command,
+    config: SandboxLaunchConfig,
+    _setup_error_path: std::path::PathBuf,
+) -> Result<()> {
     command.current_dir(&config.slot.workspace_path);
     Ok(())
 }

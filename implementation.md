@@ -1,5 +1,3 @@
-# implementation.md
-
 # Single-container Pi-agent sandbox using Linux namespaces, per-agent users, private workspaces, and Rust
 
 ## 1. Goal

@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use std::path::Path;
+
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
@@ -8,6 +10,12 @@ use crate::sandbox::SlotSpec;
 use crate::types::InjectedFile;
 
 pub struct Injector;
+
+impl Default for Injector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Injector {
     pub fn new() -> Self {
@@ -20,6 +28,7 @@ impl Injector {
             let target = slot.workspace_path.join(&rel);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).await?;
+                chown_relative_dirs(&slot.workspace_path, &rel, slot.uid, slot.gid).await?;
             }
             let mut opts = OpenOptions::new();
             opts.write(true).create_new(true);
@@ -37,4 +46,27 @@ impl Injector {
         }
         Ok(())
     }
+}
+
+async fn chown_relative_dirs(root: &Path, rel: &Path, uid: u32, gid: u32) -> Result<()> {
+    let mut current = root.to_path_buf();
+    if let Some(parent) = rel.parent() {
+        for component in parent.components() {
+            current.push(component);
+            chown(&current, uid, gid).await?;
+            set_dir_mode(&current, 0o700).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn set_dir_mode(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
 }

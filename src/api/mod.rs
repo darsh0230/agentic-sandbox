@@ -16,7 +16,7 @@ use crate::types::{AgentRunEvent, AgentRunRequest};
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ApiRequest {
     Health,
-    Run { request: AgentRunRequest },
+    Run { request: Box<AgentRunRequest> },
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -77,7 +77,7 @@ async fn handle_client(stream: UnixStream, master: Arc<Master>) -> Result<()> {
                 }
                 anyhow::Ok(writer)
             });
-            let result = master.run_agent(request, Some(tx)).await;
+            let result = master.run_agent(*request, Some(tx)).await;
             let mut writer = stream_task.await??;
             match result {
                 Ok(result) => {

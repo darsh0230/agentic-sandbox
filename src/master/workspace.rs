@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use tokio::fs;
 
-use crate::sandbox::SlotSpec;
+use crate::sandbox::{IsolationMode, SlotSpec};
 
 pub struct WorkspaceManager {
     root: PathBuf,
@@ -14,7 +14,7 @@ impl WorkspaceManager {
         Self { root }
     }
 
-    pub async fn prepare_root(root: &Path) -> Result<()> {
+    pub async fn prepare_root(root: &Path, isolation_mode: IsolationMode) -> Result<()> {
         for dir in [
             "state",
             "workspaces",
@@ -25,7 +25,11 @@ impl WorkspaceManager {
         ] {
             fs::create_dir_all(root.join(dir)).await?;
         }
-        set_mode(root, 0o700).await?;
+        let root_mode = match isolation_mode {
+            IsolationMode::Privileged => 0o700,
+            IsolationMode::User => 0o711,
+        };
+        set_mode(root, root_mode).await?;
         set_mode(&root.join("workspaces"), 0o711).await?;
         Ok(())
     }
@@ -39,8 +43,18 @@ impl WorkspaceManager {
             fs::rename(&slot.workspace_path, &tombstone).await?;
         }
         fs::create_dir_all(&slot.workspace_path).await?;
-        set_mode(&slot.workspace_path, 0o700).await?;
-        chown(&slot.workspace_path, slot.uid, slot.gid).await?;
+        for dir in [
+            slot.workspace_path.clone(),
+            slot.workspace_path.join("tmp"),
+            slot.workspace_path.join(".cache"),
+            slot.workspace_path.join(".config"),
+            slot.workspace_path.join(".local"),
+            slot.workspace_path.join(".local/share"),
+        ] {
+            fs::create_dir_all(&dir).await?;
+            set_mode(&dir, 0o700).await?;
+            chown(&dir, slot.uid, slot.gid).await?;
+        }
         if fs::try_exists(&tombstone).await? {
             fs::remove_dir_all(tombstone).await?;
         }

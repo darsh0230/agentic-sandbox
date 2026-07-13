@@ -136,15 +136,39 @@ fn configure_platform(
     config: SandboxLaunchConfig,
     setup_error_path: std::path::PathBuf,
 ) -> Result<()> {
+    if config.isolation_mode == crate::sandbox::IsolationMode::User {
+        command.current_dir(&config.slot.workspace_path);
+    }
     unsafe {
         command.pre_exec(move || {
-            crate::sandbox::init::prepare_and_drop(&config).map_err(|err| {
+            let result = match config.isolation_mode {
+                crate::sandbox::IsolationMode::Privileged => {
+                    crate::sandbox::init::prepare_and_drop(&config)
+                }
+                crate::sandbox::IsolationMode::User => prepare_user_mode(&config),
+            };
+            result.map_err(|err| {
                 let message = format!("{err:#}");
                 let _ = std::fs::write(&setup_error_path, &message);
                 std::io::Error::new(std::io::ErrorKind::Other, message)
             })
         });
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_user_mode(config: &SandboxLaunchConfig) -> Result<()> {
+    unsafe {
+        libc::setpgid(0, 0);
+    }
+    crate::sandbox::credentials::drop_to_agent(config.slot.uid, config.slot.gid)
+        .map_err(|err| anyhow::anyhow!("drop to slot uid/gid: {err}"))?;
+    crate::sandbox::credentials::drop_capabilities_best_effort();
+    crate::sandbox::credentials::set_no_new_privs()
+        .map_err(|err| anyhow::anyhow!("set no_new_privs: {err}"))?;
+    crate::sandbox::seccomp::install_agent_seccomp()
+        .map_err(|err| anyhow::anyhow!("install agent seccomp: {err}"))?;
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::sandbox::{IsolationMode, SlotSpec};
 use crate::types::AgentRunRequest;
 
 const DENY_EXACT: &[&str] = &[
@@ -19,51 +20,57 @@ const DENY_EXACT: &[&str] = &[
 ];
 
 pub fn clean_env(req: &AgentRunRequest) -> Vec<(String, String)> {
+    clean_env_with_base(req, "/home/agent", "/tmp", "agent")
+}
+
+pub fn clean_env_for_slot(
+    req: &AgentRunRequest,
+    slot: &SlotSpec,
+    isolation_mode: IsolationMode,
+) -> Vec<(String, String)> {
+    match isolation_mode {
+        IsolationMode::Privileged => clean_env(req),
+        IsolationMode::User => {
+            let workspace = slot.workspace_path.to_string_lossy();
+            let tmp = slot.workspace_path.join("tmp");
+            let tmp = tmp.to_string_lossy();
+            clean_env_with_base(req, &workspace, &tmp, &slot.id)
+        }
+    }
+}
+
+fn clean_env_with_base(
+    req: &AgentRunRequest,
+    home: &str,
+    tmp: &str,
+    username: &str,
+) -> Vec<(String, String)> {
+    let cache = format!("{home}/.cache");
+    let local = format!("{home}/.local");
     let mut env = BTreeMap::from([
-        ("HOME".to_string(), "/home/agent".to_string()),
-        ("USER".to_string(), "agent".to_string()),
-        ("LOGNAME".to_string(), "agent".to_string()),
+        ("HOME".to_string(), home.to_string()),
+        ("USER".to_string(), username.to_string()),
+        ("LOGNAME".to_string(), username.to_string()),
         ("SHELL".to_string(), "/bin/bash".to_string()),
-        ("PWD".to_string(), "/home/agent".to_string()),
+        ("PWD".to_string(), home.to_string()),
         (
             "PATH".to_string(),
             "/usr/local/bin:/usr/bin:/bin".to_string(),
         ),
-        ("TMPDIR".to_string(), "/tmp".to_string()),
-        ("TEMP".to_string(), "/tmp".to_string()),
-        ("TMP".to_string(), "/tmp".to_string()),
-        (
-            "XDG_CACHE_HOME".to_string(),
-            "/home/agent/.cache".to_string(),
-        ),
-        (
-            "XDG_CONFIG_HOME".to_string(),
-            "/home/agent/.config".to_string(),
-        ),
-        (
-            "XDG_DATA_HOME".to_string(),
-            "/home/agent/.local/share".to_string(),
-        ),
-        (
-            "PIP_CACHE_DIR".to_string(),
-            "/home/agent/.cache/pip".to_string(),
-        ),
-        (
-            "PYTHONUSERBASE".to_string(),
-            "/home/agent/.local".to_string(),
-        ),
+        ("TMPDIR".to_string(), tmp.to_string()),
+        ("TEMP".to_string(), tmp.to_string()),
+        ("TMP".to_string(), tmp.to_string()),
+        ("XDG_CACHE_HOME".to_string(), cache.clone()),
+        ("XDG_CONFIG_HOME".to_string(), format!("{home}/.config")),
+        ("XDG_DATA_HOME".to_string(), format!("{local}/share")),
+        ("PIP_CACHE_DIR".to_string(), format!("{cache}/pip")),
+        ("PYTHONUSERBASE".to_string(), local.clone()),
         (
             "PYTHONPYCACHEPREFIX".to_string(),
-            "/home/agent/.cache/pycache".to_string(),
+            format!("{cache}/pycache"),
         ),
-        (
-            "NPM_CONFIG_CACHE".to_string(),
-            "/home/agent/.cache/npm".to_string(),
-        ),
-        (
-            "NPM_CONFIG_PREFIX".to_string(),
-            "/home/agent/.local".to_string(),
-        ),
+        ("NPM_CONFIG_CACHE".to_string(), format!("{cache}/npm")),
+        ("NPM_CONFIG_PREFIX".to_string(), local),
     ]);
 
     for (key, value) in &req.env {
@@ -113,5 +120,45 @@ mod tests {
             clean_env(&req).iter().find(|(k, _)| k == "PATH").unwrap().1,
             "/usr/local/bin:/usr/bin:/bin"
         );
+    }
+
+    #[test]
+    fn user_mode_uses_workspace_env_and_blocks_overrides() {
+        let req = AgentRunRequest {
+            run_id: "r".into(),
+            command: vec!["true".into()],
+            injected_files: vec![],
+            injected_readonly_dirs: vec![],
+            env: vec![("HOME".into(), "/bad".into()), ("SAFE".into(), "ok".into())],
+            timeout_ms: 1,
+            limits: Default::default(),
+            result_policy: Default::default(),
+            cleanup_policy: Default::default(),
+        };
+        let slot = SlotSpec {
+            id: "slot-0001".into(),
+            uid: 10001,
+            gid: 10001,
+            workspace_path: "/var/lib/pi-sandbox/workspaces/slot-0001".into(),
+        };
+
+        let env = clean_env_for_slot(&req, &slot, IsolationMode::User);
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "HOME").unwrap().1,
+            "/var/lib/pi-sandbox/workspaces/slot-0001"
+        );
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "TMPDIR").unwrap().1,
+            "/var/lib/pi-sandbox/workspaces/slot-0001/tmp"
+        );
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "TMP").unwrap().1,
+            "/var/lib/pi-sandbox/workspaces/slot-0001/tmp"
+        );
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "TEMP").unwrap().1,
+            "/var/lib/pi-sandbox/workspaces/slot-0001/tmp"
+        );
+        assert!(env.iter().any(|(k, v)| k == "SAFE" && v == "ok"));
     }
 }

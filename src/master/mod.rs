@@ -13,8 +13,8 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 use crate::api::events::TailBuffer;
-use crate::policy::defaults::clean_env;
-use crate::sandbox::{OutputStream, SandboxLaunchConfig, SandboxLauncher, SlotSpec};
+use crate::policy::defaults::clean_env_for_slot;
+use crate::sandbox::{IsolationMode, OutputStream, SandboxLaunchConfig, SandboxLauncher, SlotSpec};
 use crate::types::{AgentRunEvent, AgentRunRequest, AgentRunResult, CleanupPolicy};
 
 use self::allocator::SlotAllocator;
@@ -29,17 +29,28 @@ pub struct Master {
     workspace: Arc<WorkspaceManager>,
     injector: Arc<Injector>,
     collector: Arc<ResultCollector>,
+    isolation_mode: IsolationMode,
     launcher_lock: Arc<Mutex<()>>,
 }
 
 impl Master {
-    pub async fn new(root: PathBuf, slot_count: u16) -> Result<Self> {
-        WorkspaceManager::prepare_root(&root).await?;
+    pub async fn new(
+        root: PathBuf,
+        slot_count: u16,
+        isolation_mode: IsolationMode,
+    ) -> Result<Self> {
+        WorkspaceManager::prepare_root(&root, isolation_mode).await?;
+        let planned_slots = SlotAllocator::planned_slots(&root.join("workspaces"), slot_count)?;
+        if isolation_mode == IsolationMode::User {
+            validate_user_mode_slots(&planned_slots)?;
+        }
+        info!(%isolation_mode, slots = slot_count, "sandbox isolation mode configured");
         Ok(Self {
             allocator: Arc::new(SlotAllocator::new(root.join("workspaces"), slot_count)?),
             workspace: Arc::new(WorkspaceManager::new(root.clone())),
             injector: Arc::new(Injector::new()),
             collector: Arc::new(ResultCollector::new()),
+            isolation_mode,
             root,
             launcher_lock: Arc::new(Mutex::new(())),
         })
@@ -50,10 +61,10 @@ impl Master {
         req: AgentRunRequest,
         events: Option<mpsc::Sender<AgentRunEvent>>,
     ) -> Result<AgentRunResult> {
-        validate_request(&req)?;
+        validate_request(&req, self.isolation_mode)?;
         let slot = self.allocator.allocate().await?;
         let slot_spec = SlotSpec::from(&slot);
-        info!(run_id = %req.run_id, slot = %slot.id, "allocated sandbox slot");
+        info!(run_id = %req.run_id, slot = %slot.id, isolation_mode = %self.isolation_mode, "allocated sandbox slot");
 
         let outcome = self.run_agent_in_slot(req, slot_spec, events).await;
         self.allocator.release(slot).await;
@@ -79,11 +90,12 @@ impl Master {
             .await
             .context("chown workspace")?;
 
-        let env = clean_env(&req);
+        let env = clean_env_for_slot(&req, &slot, self.isolation_mode);
         let config = SandboxLaunchConfig {
             run_id: req.run_id.clone(),
             root: self.root.clone(),
             slot: slot.clone(),
+            isolation_mode: self.isolation_mode,
             command: req.command.clone(),
             env,
             injected_readonly_dirs: req.injected_readonly_dirs.clone(),
@@ -208,7 +220,7 @@ impl Master {
     }
 }
 
-fn validate_request(req: &AgentRunRequest) -> Result<()> {
+fn validate_request(req: &AgentRunRequest, isolation_mode: IsolationMode) -> Result<()> {
     if req.run_id.is_empty()
         || req.run_id.as_bytes().contains(&0)
         || req.run_id.contains('/')
@@ -236,5 +248,70 @@ fn validate_request(req: &AgentRunRequest) -> Result<()> {
             bail!("injected directories must be readonly in this implementation");
         }
     }
+    if isolation_mode == IsolationMode::User && !req.injected_readonly_dirs.is_empty() {
+        bail!("readonly injected directories require privileged isolation mode");
+    }
     Ok(())
+}
+
+fn validate_user_mode_slots(slots: &[self::allocator::Slot]) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        for slot in slots {
+            if unsafe { libc::getpwuid(slot.uid) }.is_null() {
+                bail!(
+                    "user isolation mode requires pre-created uid {} for {}",
+                    slot.uid,
+                    slot.id
+                );
+            }
+            if unsafe { libc::getgrgid(slot.gid) }.is_null() {
+                bail!(
+                    "user isolation mode requires pre-created gid {} for {}",
+                    slot.gid,
+                    slot.id
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = slots;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AgentRunRequest, InjectedDir};
+
+    fn request() -> AgentRunRequest {
+        AgentRunRequest {
+            run_id: "r".into(),
+            command: vec!["true".into()],
+            injected_files: vec![],
+            injected_readonly_dirs: vec![],
+            env: vec![],
+            timeout_ms: 1,
+            limits: Default::default(),
+            result_policy: Default::default(),
+            cleanup_policy: Default::default(),
+        }
+    }
+
+    #[test]
+    fn user_mode_rejects_readonly_injected_dirs() {
+        let mut req = request();
+        req.injected_readonly_dirs.push(InjectedDir {
+            source_path: "/fixtures".into(),
+            sandbox_path: "/opt/fixtures".into(),
+            readonly: true,
+        });
+
+        assert!(validate_request(&req, IsolationMode::Privileged).is_ok());
+        let err = validate_request(&req, IsolationMode::User).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("readonly injected directories require privileged isolation mode")
+        );
+    }
 }

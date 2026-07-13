@@ -93,7 +93,7 @@ async fn js() -> Response {
 
 async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = authorize(&state, &headers) {
-        return response;
+        return *response;
     }
     Json(HealthResponse { status: "ok" }).into_response()
 }
@@ -104,7 +104,7 @@ async fn run_agent(
     Json(request): Json<AgentRunRequest>,
 ) -> Response {
     if let Err(response) = authorize(&state, &headers) {
-        return response;
+        return *response;
     }
 
     let (line_tx, line_rx) = mpsc::channel::<String>(128);
@@ -162,7 +162,7 @@ async fn send_line<T: serde::Serialize>(tx: &mpsc::Sender<String>, value: &T) ->
     Ok(())
 }
 
-fn authorize(state: &AppState, headers: &HeaderMap) -> std::result::Result<(), Response> {
+fn authorize(state: &AppState, headers: &HeaderMap) -> std::result::Result<(), Box<Response>> {
     let Some(token) = &state.token else {
         return Ok(());
     };
@@ -172,12 +172,14 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> std::result::Result<(), R
         .and_then(|value| value.to_str().ok())
     {
         Some(actual) if constant_time_eq(actual.as_bytes(), expected.as_bytes()) => Ok(()),
-        _ => Err((
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
-            "missing or invalid bearer token",
-        )
-            .into_response()),
+        _ => Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
+                "missing or invalid bearer token",
+            )
+                .into_response(),
+        )),
     }
 }
 

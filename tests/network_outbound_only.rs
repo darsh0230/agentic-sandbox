@@ -8,5 +8,6 @@ fn seccomp_module_is_linked_on_linux() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn linux_seccomp_is_not_available_on_non_linux() {
-    assert!(true);
+    let target = std::env::consts::OS;
+    assert_ne!(target, "linux");
 }

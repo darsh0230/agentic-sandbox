@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use pi_sandbox_master::api;
 use pi_sandbox_master::master::Master;
+use pi_sandbox_master::sandbox::IsolationMode;
 use tracing::info;
 
 #[derive(Debug, Parser)]
@@ -33,12 +34,16 @@ enum Command {
         http: Option<SocketAddr>,
         #[arg(long, env = "PI_SANDBOX_HTTP_TOKEN")]
         http_token: Option<String>,
+        #[arg(long, env = "PI_SANDBOX_ISOLATION", default_value_t = IsolationMode::Privileged)]
+        isolation: IsolationMode,
     },
     RunJson {
         #[arg(long, env = "PI_SANDBOX_ROOT", default_value = "/var/lib/pi-sandbox")]
         root: PathBuf,
         #[arg(long)]
         request: PathBuf,
+        #[arg(long, env = "PI_SANDBOX_ISOLATION", default_value_t = IsolationMode::Privileged)]
+        isolation: IsolationMode,
     },
 }
 
@@ -55,11 +60,12 @@ async fn main() -> Result<()> {
             config,
             http,
             http_token,
+            isolation,
         } => {
             if let Some(path) = config {
                 info!(config = %path.display(), "config file argument accepted for packaging compatibility");
             }
-            let master = Master::new(root, slots).await?;
+            let master = Master::new(root, slots, isolation).await?;
             if let Some(addr) = http {
                 let http_master = master.clone();
                 tokio::select! {
@@ -70,10 +76,14 @@ async fn main() -> Result<()> {
                 api::serve_unix(socket, master).await
             }
         }
-        Command::RunJson { root, request } => {
+        Command::RunJson {
+            root,
+            request,
+            isolation,
+        } => {
             let body = tokio::fs::read(&request).await?;
             let req = serde_json::from_slice(&body)?;
-            let master = Master::new(root, 1).await?;
+            let master = Master::new(root, 1, isolation).await?;
             let result = master.run_agent(req, None).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())

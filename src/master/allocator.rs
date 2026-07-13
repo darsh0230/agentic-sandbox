@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use tokio::sync::Mutex;
@@ -18,23 +18,30 @@ pub struct SlotAllocator {
 
 impl SlotAllocator {
     pub fn new(workspace_root: PathBuf, slot_count: u16) -> Result<Self> {
+        Ok(Self {
+            available: Mutex::new(VecDeque::from(Self::planned_slots(
+                &workspace_root,
+                slot_count,
+            )?)),
+        })
+    }
+
+    pub fn planned_slots(workspace_root: &Path, slot_count: u16) -> Result<Vec<Slot>> {
         if slot_count == 0 || slot_count > 4096 {
             bail!("slot count must be between 1 and 4096");
         }
-        let mut slots = VecDeque::new();
+        let mut slots = Vec::new();
         for idx in 1..=slot_count {
             let id = format!("slot-{idx:04}");
             let uid = 10_000 + u32::from(idx);
-            slots.push_back(Slot {
+            slots.push(Slot {
                 id: id.clone(),
                 uid,
                 gid: uid,
                 workspace_path: workspace_root.join(id),
             });
         }
-        Ok(Self {
-            available: Mutex::new(slots),
-        })
+        Ok(slots)
     }
 
     pub async fn allocate(&self) -> Result<Slot> {

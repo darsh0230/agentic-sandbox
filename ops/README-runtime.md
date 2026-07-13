@@ -1,6 +1,6 @@
 # Runtime
 
-Build and run:
+Build and run in privileged isolation mode:
 
 ```bash
 docker build -t pi-sandbox:dev .
@@ -25,8 +25,24 @@ docker run --rm -it \
   -p 127.0.0.1:8080:8080 \
   -v pi-sandbox-state:/var/lib/pi-sandbox \
   pi-sandbox:dev \
+  /usr/local/bin/pi-sandbox-master serve --isolation privileged --http 0.0.0.0:8080
+```
+
+Privileged mode is the default. It uses Linux namespaces, bind mounts, `pivot_root`, private tmpfs locations, per-slot UIDs, and child seccomp. It requires `CAP_SYS_ADMIN` and a setup-compatible container seccomp profile.
+
+Run in user isolation mode without `CAP_SYS_ADMIN`, `privileged: true`, or `seccomp=unconfined`:
+
+```bash
+docker run --rm -it \
+  --name pi-sandbox \
+  -e PI_SANDBOX_ISOLATION=user \
+  -e PI_SANDBOX_HTTP_TOKEN=change-me-dev-token \
+  -p 127.0.0.1:8080:8080 \
+  pi-sandbox:dev \
   /usr/local/bin/pi-sandbox-master serve --http 0.0.0.0:8080
 ```
+
+User mode keeps the master as root, validates pre-created per-slot users, prepares `0700` slot workspaces, runs commands as the slot UID/GID, uses workspace-local temp/cache directories, sets `no_new_privs`, and installs child seccomp. User mode does not hide the container filesystem, create private mount/network namespaces, mount private `/proc`, or support readonly injected directories.
 
 Open the UI at `http://127.0.0.1:8080` and enter the token value from `PI_SANDBOX_HTTP_TOKEN`.
 
@@ -75,7 +91,7 @@ bash -lc 'set -e; whoami; id; mkdir -p .pi output; printf "{\"status\":\"ok\",\"
 For your real Pi run, keep the injected task content in the UI and use:
 
 ```bash
-pi --workspace /home/agent --input /home/agent/input/task.md
+pi --workspace "$HOME" --input "$HOME/input/task.md"
 ```
 
-The agent should write structured output to `/home/agent/.pi/result.json` and artifacts under `/home/agent/output` so the master can collect them.
+The agent should write structured output to `$HOME/.pi/result.json` and artifacts under `$HOME/output` so the master can collect them. In privileged mode `$HOME` is `/home/agent`; in user mode it is the allocated slot workspace under `/var/lib/pi-sandbox/workspaces`.

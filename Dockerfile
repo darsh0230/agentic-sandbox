@@ -27,8 +27,12 @@ RUN set -eux; \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; \
     apt-get install -y --no-install-recommends nodejs; \
     node -v; \
-    npm install -g --ignore-scripts @earendil-works/pi-coding-agent; \
-    npm cache clean --force; \
+    npm install -g --ignore-scripts \
+    @earendil-works/pi-coding-agent \
+    pi-provider-litellm \
+    @darsh0230/pi-langfuse; \
+    npm cache add pi-provider-litellm; \
+    npm cache add @darsh0230/pi-langfuse; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \

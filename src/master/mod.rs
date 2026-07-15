@@ -14,6 +14,8 @@ use tracing::{info, warn};
 
 use crate::api::events::TailBuffer;
 use crate::policy::defaults::clean_env_for_slot;
+use crate::proxy::ProxyHandle;
+use crate::proxy::mitm::{PRIVILEGED_CA_PATH, WORKSPACE_CA_RELATIVE_PATH};
 use crate::sandbox::{IsolationMode, OutputStream, SandboxLaunchConfig, SandboxLauncher, SlotSpec};
 use crate::types::{AgentRunEvent, AgentRunRequest, AgentRunResult, CleanupPolicy};
 
@@ -31,6 +33,7 @@ pub struct Master {
     collector: Arc<ResultCollector>,
     isolation_mode: IsolationMode,
     launcher_lock: Arc<Mutex<()>>,
+    proxy: Option<ProxyHandle>,
 }
 
 impl Master {
@@ -38,6 +41,7 @@ impl Master {
         root: PathBuf,
         slot_count: u16,
         isolation_mode: IsolationMode,
+        proxy: Option<ProxyHandle>,
     ) -> Result<Self> {
         WorkspaceManager::prepare_root(&root, isolation_mode).await?;
         let planned_slots = SlotAllocator::planned_slots(&root.join("workspaces"), slot_count)?;
@@ -53,6 +57,7 @@ impl Master {
             isolation_mode,
             root,
             launcher_lock: Arc::new(Mutex::new(())),
+            proxy,
         })
     }
 
@@ -62,6 +67,9 @@ impl Master {
         events: Option<mpsc::Sender<AgentRunEvent>>,
     ) -> Result<AgentRunResult> {
         validate_request(&req, self.isolation_mode)?;
+        if self.proxy.is_none() && !req.inject_headers.is_empty() {
+            bail!("inject_headers requires proxy support; remove --disable-proxy");
+        }
         let slot = self.allocator.allocate().await?;
         let slot_spec = SlotSpec::from(&slot);
         info!(run_id = %req.run_id, slot = %slot.id, isolation_mode = %self.isolation_mode, "allocated sandbox slot");
@@ -85,12 +93,39 @@ impl Master {
             .inject(&slot, &req.injected_files)
             .await
             .context("inject files")?;
+        if let Some(proxy) = &self.proxy
+            && let Some(ca_cert_pem) = proxy.ca_cert_pem()
+        {
+            self.injector
+                .inject(
+                    &slot,
+                    &[crate::types::InjectedFile {
+                        relative_path: WORKSPACE_CA_RELATIVE_PATH.to_string(),
+                        content: ca_cert_pem.as_bytes().to_vec(),
+                        mode: 0o600,
+                    }],
+                )
+                .await
+                .context("inject proxy MITM CA certificate")?;
+        }
         self.workspace
             .chown_workspace(&slot)
             .await
             .context("chown workspace")?;
 
-        let env = clean_env_for_slot(&req, &slot, self.isolation_mode);
+        let mut env = clean_env_for_slot(&req, &slot, self.isolation_mode);
+        let _proxy_guard = if let Some(proxy) = &self.proxy {
+            let registration = proxy
+                .register_run(&req.run_id, &slot.id, &req.inject_headers)
+                .context("register proxy run context")?;
+            env.extend(registration.env());
+            if proxy.ca_cert_pem().is_some() {
+                env.extend(proxy_ca_env(&slot, self.isolation_mode));
+            }
+            Some(registration)
+        } else {
+            None
+        };
         let config = SandboxLaunchConfig {
             run_id: req.run_id.clone(),
             root: self.root.clone(),
@@ -220,6 +255,23 @@ impl Master {
     }
 }
 
+fn proxy_ca_env(slot: &SlotSpec, isolation_mode: IsolationMode) -> Vec<(String, String)> {
+    let ca_path = match isolation_mode {
+        IsolationMode::Privileged => PRIVILEGED_CA_PATH.to_string(),
+        IsolationMode::User => slot
+            .workspace_path
+            .join(WORKSPACE_CA_RELATIVE_PATH)
+            .to_string_lossy()
+            .into_owned(),
+    };
+    vec![
+        ("SSL_CERT_FILE".to_string(), ca_path.clone()),
+        ("REQUESTS_CA_BUNDLE".to_string(), ca_path.clone()),
+        ("NODE_EXTRA_CA_CERTS".to_string(), ca_path.clone()),
+        ("GIT_SSL_CAINFO".to_string(), ca_path),
+    ]
+}
+
 fn validate_request(req: &AgentRunRequest, isolation_mode: IsolationMode) -> Result<()> {
     if req.run_id.is_empty()
         || req.run_id.as_bytes().contains(&0)
@@ -251,6 +303,12 @@ fn validate_request(req: &AgentRunRequest, isolation_mode: IsolationMode) -> Res
     if isolation_mode == IsolationMode::User && !req.injected_readonly_dirs.is_empty() {
         bail!("readonly injected directories require privileged isolation mode");
     }
+    crate::proxy::headers::resolve_rules(
+        &req.inject_headers,
+        crate::proxy::HeaderRuleSource::Run {
+            run_id: req.run_id.clone(),
+        },
+    )?;
     Ok(())
 }
 
@@ -295,6 +353,7 @@ mod tests {
             limits: Default::default(),
             result_policy: Default::default(),
             cleanup_policy: Default::default(),
+            inject_headers: vec![],
         }
     }
 

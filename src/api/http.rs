@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::body::Body;
@@ -11,7 +12,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::info;
 
@@ -21,6 +23,7 @@ use crate::types::{AgentRunEvent, AgentRunRequest};
 const INDEX_HTML: &str = include_str!("../../ui/index.html");
 const APP_CSS: &str = include_str!("../../ui/app.css");
 const APP_JS: &str = include_str!("../../ui/app.js");
+const RUN_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub struct HttpConfig {
@@ -42,6 +45,7 @@ struct HealthResponse<'a> {
 #[derive(serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RunLine<'a> {
+    Heartbeat,
     Event {
         event: &'a AgentRunEvent,
     },
@@ -109,7 +113,13 @@ async fn run_agent(
 
     let (line_tx, line_rx) = mpsc::channel::<String>(128);
     let (event_tx, mut event_rx) = mpsc::channel::<AgentRunEvent>(128);
+    let (done_tx, done_rx) = watch::channel(false);
     let master = state.master.clone();
+
+    let heartbeat_line_tx = line_tx.clone();
+    tokio::spawn(async move {
+        send_heartbeats(heartbeat_line_tx, done_rx).await;
+    });
 
     let event_line_tx = line_tx.clone();
     tokio::spawn(async move {
@@ -140,6 +150,7 @@ async fn run_agent(
                 .await;
             }
         }
+        let _ = done_tx.send(true);
     });
     drop(line_tx);
 
@@ -148,11 +159,36 @@ async fn run_agent(
     (
         [
             (header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
+            (header::CACHE_CONTROL, "no-store, no-transform"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         Body::from_stream(stream),
     )
         .into_response()
+}
+
+async fn send_heartbeats(tx: mpsc::Sender<String>, mut done_rx: watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(RUN_STREAM_HEARTBEAT_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if *done_rx.borrow() {
+                    return;
+                }
+                if send_line(&tx, &RunLine::Heartbeat).await.is_err() {
+                    return;
+                }
+            }
+            changed = done_rx.changed() => {
+                if changed.is_err() || *done_rx.borrow() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 async fn send_line<T: serde::Serialize>(tx: &mpsc::Sender<String>, value: &T) -> Result<()> {

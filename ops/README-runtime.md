@@ -95,3 +95,55 @@ pi --workspace "$HOME" --input "$HOME/input/task.md"
 ```
 
 The agent should write structured output to `$HOME/.pi/result.json` and artifacts under `$HOME/output` so the master can collect them. In privileged mode `$HOME` is `/home/agent`; in user mode it is the allocated slot workspace under `/var/lib/pi-sandbox/workspaces`.
+
+## Proxy Header Injection And Upstream Proxying
+
+`AgentRunRequest.inject_headers` can inject headers into matching outbound requests made through the master proxy. Each rule can also attach an upstream proxy for matching requests by setting `http_proxy` and/or `https_proxy`. `override_header_key` and `override_header_value` are optional, but must be provided together when used. Omit them or set them to `null` for proxy-only routing rules. Rules with only `endpoint` and no action are ignored.
+
+```json
+{
+  "run_id": "proxy-example",
+  "command": ["bash", "-lc", "curl https://mimir.example.net/api"],
+  "inject_headers": [
+    {
+      "endpoint": "https://mimir.example.net/*",
+      "override_header_key": "Cookie",
+      "override_header_value": "lightbox=session-token",
+      "http_proxy": "http://utils.outbound.example.net:80",
+      "https_proxy": "http://utils.outbound.example.net:80"
+    }
+  ]
+}
+```
+
+Global rules use the same fields in the proxy config file:
+
+```json
+{
+  "global_inject_headers": [
+    {
+      "endpoint": "https://mimir.example.net/*",
+      "override_header_key": "Cookie",
+      "override_header_value": "env:MIMIR_LIGHTBOX_COOKIE",
+      "https_proxy": "http://utils.outbound.example.net:80"
+    }
+  ]
+}
+```
+
+Proxy-only rules are valid:
+
+```json
+{
+  "inject_headers": [
+    {
+      "endpoint": "https://mimir.example.net/*",
+      "override_header_key": null,
+      "override_header_value": null,
+      "https_proxy": "http://utils.outbound.example.net:80"
+    }
+  ]
+}
+```
+
+Rules are matched against normalized absolute URLs. Global rules apply first, per-run rules apply after them, and the last matching rule with a proxy for the request scheme selects the upstream proxy. HTTPS header injection requires MITM mode; without MITM, only the CONNECT host can be matched and tunneled through a matching `https_proxy`.

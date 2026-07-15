@@ -11,6 +11,8 @@ pub struct AgentRunRequest {
     pub injected_readonly_dirs: Vec<InjectedDir>,
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    #[serde(default)]
+    pub inject_headers: Vec<HeaderOverrideRule>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default)]
@@ -19,6 +21,19 @@ pub struct AgentRunRequest {
     pub result_policy: ResultPolicy,
     #[serde(default)]
     pub cleanup_policy: CleanupPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeaderOverrideRule {
+    pub endpoint: String,
+    #[serde(default)]
+    pub override_header_key: Option<String>,
+    #[serde(default)]
+    pub override_header_value: Option<String>,
+    #[serde(default)]
+    pub http_proxy: Option<String>,
+    #[serde(default)]
+    pub https_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

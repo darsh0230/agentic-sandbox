@@ -60,4 +60,4 @@ ENV RUST_LOG=info
 ENV PI_SANDBOX_ROOT=/var/lib/pi-sandbox
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/pi-sandbox-entrypoint"]
-CMD ["/usr/local/bin/pi-sandbox-master", "serve", "--config", "/etc/pi-sandbox/config.toml"]
+CMD ["/usr/local/bin/pi-sandbox-master", "serve"]

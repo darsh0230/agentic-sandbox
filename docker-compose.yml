@@ -34,8 +34,6 @@ services:
     command:
       - /usr/local/bin/pi-sandbox-master
       - serve
-      - --config
-      - /etc/pi-sandbox/config.toml
       - --http
       - 0.0.0.0:8080
 

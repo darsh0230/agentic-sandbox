@@ -4,9 +4,9 @@
 Start a master with exactly one slot:
 
     cargo run -- serve \
-      --root /tmp/pi-sandbox-disconnect-test \
+      --root /tmp/agentic-sandbox-disconnect-test \
       --slots 1 \
-      --socket /tmp/pi-sandbox-disconnect-test/master.sock \
+      --socket /tmp/agentic-sandbox-disconnect-test/master.sock \
       --disable-proxy \
       --http 127.0.0.1:8080 \
       --isolation user
@@ -294,9 +294,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--url", default="http://127.0.0.1:8080")
     parser.add_argument(
         "--token",
-        default=os.environ.get("PI_SANDBOX_HTTP_TOKEN"),
+        default=os.environ.get("AGENTIC_SANDBOX_HTTP_TOKEN"),
         help=(
-            "Bearer token (default: PI_SANDBOX_HTTP_TOKEN); omit when the "
+            "Bearer token (default: AGENTIC_SANDBOX_HTTP_TOKEN); omit when the "
             "HTTP API has no token configured"
         ),
     )

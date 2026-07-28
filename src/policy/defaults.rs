@@ -155,25 +155,25 @@ mod tests {
             id: "slot-0001".into(),
             uid: 10001,
             gid: 10001,
-            workspace_path: "/var/lib/pi-sandbox/workspaces/slot-0001".into(),
+            workspace_path: "/var/lib/agentic-sandbox/workspaces/slot-0001".into(),
         };
 
         let env = clean_env_for_slot(&req, &slot, IsolationMode::User);
         assert_eq!(
             env.iter().find(|(k, _)| k == "HOME").unwrap().1,
-            "/var/lib/pi-sandbox/workspaces/slot-0001"
+            "/var/lib/agentic-sandbox/workspaces/slot-0001"
         );
         assert_eq!(
             env.iter().find(|(k, _)| k == "TMPDIR").unwrap().1,
-            "/var/lib/pi-sandbox/workspaces/slot-0001/tmp"
+            "/var/lib/agentic-sandbox/workspaces/slot-0001/tmp"
         );
         assert_eq!(
             env.iter().find(|(k, _)| k == "TMP").unwrap().1,
-            "/var/lib/pi-sandbox/workspaces/slot-0001/tmp"
+            "/var/lib/agentic-sandbox/workspaces/slot-0001/tmp"
         );
         assert_eq!(
             env.iter().find(|(k, _)| k == "TEMP").unwrap().1,
-            "/var/lib/pi-sandbox/workspaces/slot-0001/tmp"
+            "/var/lib/agentic-sandbox/workspaces/slot-0001/tmp"
         );
         assert!(env.iter().any(|(k, v)| k == "SAFE" && v == "ok"));
     }

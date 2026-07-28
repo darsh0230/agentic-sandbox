@@ -1,12 +1,14 @@
+name: agentic-sandbox
+
 services:
-  pi-sandbox:
+  agentic-sandbox:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pi-sandbox:dev
-    container_name: pi-sandbox
+    image: agentic-sandbox:dev
+    container_name: agentic-sandbox
     networks:
-      - pi-sandbox-net
+      - agentic-sandbox-net
     cap_drop:
       - ALL
     cap_add:
@@ -26,20 +28,20 @@ services:
     ports:
       - 127.0.0.1:8080:8080
     volumes:
-      - pi-sandbox-state:/var/lib/pi-sandbox
+      - agentic-sandbox-state:/var/lib/agentic-sandbox
     environment:
       RUST_LOG: info
-      PI_SANDBOX_ROOT: /var/lib/pi-sandbox
-      PI_SANDBOX_HTTP_TOKEN: change-me-dev-token
+      AGENTIC_SANDBOX_ROOT: /var/lib/agentic-sandbox
+      AGENTIC_SANDBOX_HTTP_TOKEN: ${AGENTIC_SANDBOX_HTTP_TOKEN:-change-me-dev-token}
     command:
-      - /usr/local/bin/pi-sandbox-master
+      - /usr/local/bin/agentic-sandbox
       - serve
       - --http
       - 0.0.0.0:8080
 
 networks:
-  pi-sandbox-net:
+  agentic-sandbox-net:
     driver: bridge
 
 volumes:
-  pi-sandbox-state:
+  agentic-sandbox-state:

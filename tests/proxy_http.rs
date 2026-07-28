@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
-use pi_sandbox_master::proxy::{HeaderRuleSource, ProxyConfig, ProxyHandle, headers};
-use pi_sandbox_master::types::HeaderOverrideRule;
+use agentic_sandbox::proxy::{HeaderRuleSource, ProxyConfig, ProxyHandle, headers};
+use agentic_sandbox::types::HeaderOverrideRule;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 

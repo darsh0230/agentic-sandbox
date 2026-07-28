@@ -1,4 +1,4 @@
-use pi_sandbox_master::common::paths::validate_relative_path;
+use agentic_sandbox::common::paths::validate_relative_path;
 
 #[test]
 fn injected_paths_reject_escape_attempts() {

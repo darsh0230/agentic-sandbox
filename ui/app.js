@@ -16,7 +16,7 @@ function init() {
   $("runId").value = `run-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`;
   $("command").value = defaults.command;
   $("task").value = defaults.task;
-  $("token").value = localStorage.getItem("piSandboxToken") || "";
+  $("token").value = localStorage.getItem("agenticSandboxToken") || "";
   $("healthBtn").addEventListener("click", checkHealth);
   $("clearBtn").addEventListener("click", clearOutput);
   $("clearUploadsBtn").addEventListener("click", clearUploads);
@@ -31,7 +31,7 @@ function init() {
 
 function authHeaders() {
   const token = $("token").value.trim();
-  localStorage.setItem("piSandboxToken", token);
+  localStorage.setItem("agenticSandboxToken", token);
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 

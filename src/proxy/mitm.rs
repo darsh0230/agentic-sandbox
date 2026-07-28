@@ -155,7 +155,7 @@ fn ca_params(key_pair: KeyPair) -> CertificateParams {
     params.distinguished_name = DistinguishedName::new();
     params
         .distinguished_name
-        .push(DnType::CommonName, "pi-sandbox proxy MITM CA");
+        .push(DnType::CommonName, "agentic-sandbox proxy MITM CA");
     params.key_pair = Some(key_pair);
     params
 }

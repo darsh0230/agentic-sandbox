@@ -8,9 +8,9 @@ use crate::types::HeaderOverrideRule;
 
 use super::{HeaderRuleSource, ResolvedHeaderOverrideRule, headers};
 
-pub const DEFAULT_PROXY_CONFIG_PATH: &str = "/var/lib/pi-sandbox/state/proxy-headers.json";
-pub const DEFAULT_PROXY_CA_CERT_PATH: &str = "/var/lib/pi-sandbox/state/proxy-ca.pem";
-pub const DEFAULT_PROXY_CA_KEY_PATH: &str = "/var/lib/pi-sandbox/state/proxy-ca-key.pem";
+pub const DEFAULT_PROXY_CONFIG_PATH: &str = "/var/lib/agentic-sandbox/state/proxy-headers.json";
+pub const DEFAULT_PROXY_CA_CERT_PATH: &str = "/var/lib/agentic-sandbox/state/proxy-ca.pem";
+pub const DEFAULT_PROXY_CA_KEY_PATH: &str = "/var/lib/agentic-sandbox/state/proxy-ca-key.pem";
 
 pub struct ProxyConfig {
     pub listen_addr: SocketAddr,

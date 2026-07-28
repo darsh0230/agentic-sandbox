@@ -63,7 +63,7 @@ Send one JSON request per line:
 ```
 
 ```json
-{"type":"run","request":{"run_id":"smoke-001","command":["bash","-lc","whoami; id; mkdir -p .pi output; echo '{\"status\":\"ok\"}' > .pi/result.json; echo ok > output/result.txt"],"injected_files":[{"relative_path":"input/task.md","content_utf8":"write ok","mode":420}],"result_policy":{"collect_paths":["output/result.txt"],"result_file":".pi/result.json"}}}
+{"type":"run","request":{"run_id":"smoke-001","command":["bash","-lc","whoami; id; mkdir -p output; echo '{\"status\":\"ok\"}' > result.json; echo ok > output/result.txt"],"injected_files":[{"relative_path":"input/task.md","content_utf8":"write ok","mode":420}],"result_policy":{"collect_paths":["output/result.txt"],"result_file":"result.json"}}}
 ```
 
 ## Slot wait queue
@@ -77,8 +77,12 @@ waiting. Requests beyond the limit receive an error response.
 A queued request receives a `waiting_for_slot` event with its position at the
 time it entered the queue and the configured limit. HTTP and Unix-socket run
 streams both send `{"type":"heartbeat"}` every 15 seconds while waiting and
-while running. If a client disconnects while queued, its reservation is
-removed so it does not consume queue capacity.
+while running. By default, if a client disconnects while queued, its
+reservation is removed so it does not consume queue capacity. If it
+disconnects after launch, the master kills and reaps the sandbox process tree,
+runs the configured cleanup, and then releases the slot. Set
+`"kill_on_disconnect": false` in `AgentRunRequest` to let a queued or running
+request continue after its client disconnects. The default is `true`.
 
 ## Running your Pi agent
 
@@ -99,7 +103,7 @@ Recommended options:
 For a quick non-Pi smoke run in the UI, use this command:
 
 ```bash
-bash -lc 'set -e; whoami; id; mkdir -p .pi output; printf "{\"status\":\"ok\",\"summary\":\"smoke complete\"}" > .pi/result.json; echo ok > output/result.txt'
+bash -lc 'set -e; whoami; id; mkdir -p output; printf "{\"status\":\"ok\",\"summary\":\"smoke complete\"}" > result.json; echo ok > output/result.txt'
 ```
 
 For your real Pi run, keep the injected task content in the UI and use:
@@ -108,7 +112,7 @@ For your real Pi run, keep the injected task content in the UI and use:
 pi --workspace "$HOME" --input "$HOME/input/task.md"
 ```
 
-The agent should write structured output to `$HOME/.pi/result.json` and artifacts under `$HOME/output` so the master can collect them. In privileged mode `$HOME` is `/home/agent`; in user mode it is the allocated slot workspace under `/var/lib/pi-sandbox/workspaces`.
+The agent should write structured output to `$HOME/result.json` and artifacts under `$HOME/output` so the master can collect them. In privileged mode `$HOME` is `/home/agent`; in user mode it is the allocated slot workspace under `/var/lib/pi-sandbox/workspaces`.
 
 ## Proxy Header Injection And Upstream Proxying
 

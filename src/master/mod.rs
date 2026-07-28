@@ -7,7 +7,7 @@ pub mod workspace;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::{Mutex, mpsc};
@@ -106,18 +106,24 @@ impl Master {
                     "run waiting for sandbox slot"
                 );
                 let lease = if let Some(tx) = &events {
-                    tx.send(AgentRunEvent::WaitingForSlot {
+                    let event = AgentRunEvent::WaitingForSlot {
                         position: status.position,
                         max_waiting: status.max_waiting,
-                    })
-                    .await
-                    .context("event stream closed while entering sandbox wait queue")?;
+                    };
 
-                    tokio::select! {
-                        lease = waiter.wait() => lease?,
-                        _ = tx.closed() => {
-                            bail!("client disconnected while waiting for a sandbox slot");
+                    if req.kill_on_disconnect {
+                        tx.send(event)
+                            .await
+                            .context("client disconnected while entering sandbox wait queue")?;
+                        tokio::select! {
+                            lease = waiter.wait() => lease?,
+                            _ = tx.closed() => {
+                                bail!("client disconnected while waiting for a sandbox slot");
+                            }
                         }
+                    } else {
+                        let _ = tx.send(event).await;
+                        waiter.wait().await?
                     }
                 } else {
                     waiter.wait().await?
@@ -151,33 +157,45 @@ impl Master {
         slot: SlotSpec,
         events: Option<mpsc::Sender<AgentRunEvent>>,
     ) -> Result<AgentRunResult> {
-        self.workspace
-            .reset_workspace(&slot)
-            .await
-            .context("reset workspace")?;
-        self.injector
-            .inject(&slot, &req.injected_files)
-            .await
-            .context("inject files")?;
+        await_while_connected(
+            self.workspace.reset_workspace(&slot),
+            req.kill_on_disconnect,
+            events.as_ref(),
+        )
+        .await?
+        .context("reset workspace")?;
+        await_while_connected(
+            self.injector.inject(&slot, &req.injected_files),
+            req.kill_on_disconnect,
+            events.as_ref(),
+        )
+        .await?
+        .context("inject files")?;
         if let Some(proxy) = &self.proxy
             && let Some(ca_cert_pem) = proxy.ca_cert_pem()
         {
-            self.injector
-                .inject(
+            await_while_connected(
+                self.injector.inject(
                     &slot,
                     &[crate::types::InjectedFile {
                         relative_path: WORKSPACE_CA_RELATIVE_PATH.to_string(),
                         content: ca_cert_pem.as_bytes().to_vec(),
                         mode: 0o600,
                     }],
-                )
-                .await
-                .context("inject proxy MITM CA certificate")?;
+                ),
+                req.kill_on_disconnect,
+                events.as_ref(),
+            )
+            .await?
+            .context("inject proxy MITM CA certificate")?;
         }
-        self.workspace
-            .chown_workspace(&slot)
-            .await
-            .context("chown workspace")?;
+        await_while_connected(
+            self.workspace.chown_workspace(&slot),
+            req.kill_on_disconnect,
+            events.as_ref(),
+        )
+        .await?
+        .context("chown workspace")?;
 
         let mut env = clean_env_for_slot(&req, &slot, self.isolation_mode);
         let _proxy_guard = if let Some(proxy) = &self.proxy {
@@ -202,7 +220,12 @@ impl Master {
             injected_readonly_dirs: req.injected_readonly_dirs.clone(),
         };
 
-        let _guard = self.launcher_lock.lock().await;
+        let _guard = await_while_connected(
+            self.launcher_lock.lock(),
+            req.kill_on_disconnect,
+            events.as_ref(),
+        )
+        .await?;
         let mut child = SandboxLauncher::spawn(config).context("spawn sandbox")?;
         drop(_guard);
 
@@ -229,46 +252,68 @@ impl Master {
         let mut stdout_tail = TailBuffer::new(stdout_max);
         let mut stderr_tail = TailBuffer::new(stderr_max);
 
-        let timed_out = tokio::time::timeout(std::time::Duration::from_millis(req.timeout_ms), async {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
-            loop {
-                tokio::select! {
-                    chunk = child.next_output() => {
-                        if let Some(chunk) = chunk {
-                            match chunk.stream {
-                                OutputStream::Stdout => {
-                                    stdout_tail.push(&chunk.data);
-                                    if let Some(tx) = &events { let _ = tx.send(AgentRunEvent::Stdout { data: chunk.data }).await; }
-                                }
-                                OutputStream::Stderr => {
-                                    stderr_tail.push(&chunk.data);
-                                    if let Some(tx) = &events { let _ = tx.send(AgentRunEvent::Stderr { data: chunk.data }).await; }
-                                }
-                            }
+        let timeout = tokio::time::sleep(Duration::from_millis(req.timeout_ms));
+        tokio::pin!(timeout);
+        let disconnect_events = req.kill_on_disconnect.then(|| events.clone()).flatten();
+        let disconnected = async move {
+            match disconnect_events {
+                Some(tx) => tx.closed().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(disconnected);
+
+        let mut interval = tokio::time::interval(Duration::from_millis(25));
+        let mut output_open = true;
+        let termination = loop {
+            tokio::select! {
+                chunk = child.next_output(), if output_open => {
+                    match chunk {
+                        Some(chunk) => {
+                            forward_output(
+                                chunk,
+                                &mut stdout_tail,
+                                &mut stderr_tail,
+                                events.as_ref(),
+                            ).await;
                         }
-                    }
-                    _ = interval.tick() => {
-                        if child.try_wait().await?.is_some() {
-                            while let Ok(chunk) = tokio::time::timeout(std::time::Duration::from_millis(25), child.next_output()).await {
-                                let Some(chunk) = chunk else { break; };
-                                match chunk.stream {
-                                    OutputStream::Stdout => { stdout_tail.push(&chunk.data); if let Some(tx) = &events { let _ = tx.send(AgentRunEvent::Stdout { data: chunk.data }).await; } }
-                                    OutputStream::Stderr => { stderr_tail.push(&chunk.data); if let Some(tx) = &events { let _ = tx.send(AgentRunEvent::Stderr { data: chunk.data }).await; } }
-                                }
-                            }
-                            break;
-                        }
+                        None => output_open = false,
                     }
                 }
+                _ = interval.tick() => {
+                    if child.try_wait().await?.is_some() {
+                        while let Ok(chunk) = tokio::time::timeout(
+                            Duration::from_millis(25),
+                            child.next_output(),
+                        ).await {
+                            let Some(chunk) = chunk else { break; };
+                            forward_output(
+                                chunk,
+                                &mut stdout_tail,
+                                &mut stderr_tail,
+                                events.as_ref(),
+                            ).await;
+                        }
+                        break RunTermination::Exited;
+                    }
+                }
+                _ = &mut timeout => break RunTermination::TimedOut,
+                _ = &mut disconnected => break RunTermination::ClientDisconnected,
             }
-            anyhow::Ok(())
-        }).await.is_err();
+        };
 
-        if timed_out {
-            warn!(run_id = %req.run_id, "sandbox timed out; killing process tree");
-            let _ = child.kill().await;
-            if let Some(tx) = &events {
-                let _ = tx.send(AgentRunEvent::TimedOut).await;
+        match termination {
+            RunTermination::Exited => {}
+            RunTermination::TimedOut => {
+                warn!(run_id = %req.run_id, "sandbox timed out; killing process tree");
+                let _ = child.kill().await;
+                if let Some(tx) = &events {
+                    let _ = tx.send(AgentRunEvent::TimedOut).await;
+                }
+            }
+            RunTermination::ClientDisconnected => {
+                warn!(run_id = %req.run_id, "client disconnected; killing sandbox process tree");
+                let _ = child.kill().await;
             }
         }
 
@@ -298,7 +343,7 @@ impl Master {
             || (matches!(
                 req.cleanup_policy,
                 CleanupPolicy::PreserveWorkspaceOnFailure
-            ) && (timed_out || exit.code != Some(0)));
+            ) && (termination != RunTermination::Exited || exit.code != Some(0)));
         if !preserve {
             self.workspace
                 .reset_workspace(&slot)
@@ -318,6 +363,49 @@ impl Master {
             result_json: collected.result_json,
             workspace_preserved: preserve,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunTermination {
+    Exited,
+    TimedOut,
+    ClientDisconnected,
+}
+
+async fn await_while_connected<T>(
+    operation: impl std::future::Future<Output = T>,
+    kill_on_disconnect: bool,
+    events: Option<&mpsc::Sender<AgentRunEvent>>,
+) -> Result<T> {
+    if kill_on_disconnect && let Some(tx) = events {
+        tokio::select! {
+            result = operation => Ok(result),
+            _ = tx.closed() => bail!("client disconnected before sandbox started"),
+        }
+    } else {
+        Ok(operation.await)
+    }
+}
+
+async fn forward_output(
+    chunk: crate::sandbox::OutputChunk,
+    stdout_tail: &mut TailBuffer,
+    stderr_tail: &mut TailBuffer,
+    events: Option<&mpsc::Sender<AgentRunEvent>>,
+) {
+    let event = match chunk.stream {
+        OutputStream::Stdout => {
+            stdout_tail.push(&chunk.data);
+            AgentRunEvent::Stdout { data: chunk.data }
+        }
+        OutputStream::Stderr => {
+            stderr_tail.push(&chunk.data);
+            AgentRunEvent::Stderr { data: chunk.data }
+        }
+    };
+    if let Some(tx) = events {
+        let _ = tx.send(event).await;
     }
 }
 
@@ -416,6 +504,7 @@ mod tests {
             injected_readonly_dirs: vec![],
             env: vec![],
             timeout_ms: 1,
+            kill_on_disconnect: true,
             limits: Default::default(),
             result_policy: Default::default(),
             cleanup_policy: Default::default(),
@@ -438,5 +527,105 @@ mod tests {
             err.to_string()
                 .contains("readonly injected directories require privileged isolation mode")
         );
+    }
+
+    #[tokio::test]
+    async fn prelaunch_work_is_canceled_when_the_client_disconnects() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        let err = await_while_connected(std::future::pending::<()>(), true, Some(&tx))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "client disconnected before sandbox started"
+        );
+    }
+
+    #[tokio::test]
+    async fn prelaunch_work_continues_when_disconnect_killing_is_disabled() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        let value = await_while_connected(async { 42 }, false, Some(&tx))
+            .await
+            .unwrap();
+
+        assert_eq!(value, 42);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[tokio::test]
+    async fn disconnect_kills_and_reaps_a_running_sandbox() {
+        let root = tempfile::tempdir().unwrap();
+        let master = Master::new(root.path().to_path_buf(), 1, IsolationMode::User, None)
+            .await
+            .unwrap();
+        let mut req = request();
+        req.run_id = "disconnect-kills".into();
+        req.command = vec!["/bin/sleep".into(), "10".into()];
+        req.timeout_ms = 10_000;
+        req.result_policy.result_file = None;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let run_task = tokio::spawn({
+            let master = master.clone();
+            async move { master.run_agent(req, Some(tx)).await }
+        });
+        loop {
+            match rx.recv().await {
+                Some(AgentRunEvent::Started { .. }) => break,
+                Some(_) => {}
+                None => panic!("run ended before the sandbox started"),
+            }
+        }
+        drop(rx);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), run_task)
+            .await
+            .expect("disconnected run should be killed promptly")
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(result.exit_code, Some(0));
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[tokio::test]
+    async fn disconnect_opt_out_allows_a_running_sandbox_to_finish() {
+        let root = tempfile::tempdir().unwrap();
+        let master = Master::new(root.path().to_path_buf(), 1, IsolationMode::User, None)
+            .await
+            .unwrap();
+        let mut req = request();
+        req.run_id = "disconnect-continues".into();
+        req.command = vec!["/bin/sleep".into(), "0.1".into()];
+        req.timeout_ms = 2_000;
+        req.kill_on_disconnect = false;
+        req.result_policy.result_file = None;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let run_task = tokio::spawn({
+            let master = master.clone();
+            async move { master.run_agent(req, Some(tx)).await }
+        });
+        loop {
+            match rx.recv().await {
+                Some(AgentRunEvent::Started { .. }) => break,
+                Some(_) => {}
+                None => panic!("run ended before the sandbox started"),
+            }
+        }
+        drop(rx);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), run_task)
+            .await
+            .expect("opted-out run should finish normally")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
     }
 }

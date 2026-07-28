@@ -417,6 +417,8 @@ pub struct AgentRunRequest {
     pub injected_readonly_dirs: Vec<InjectedDir>,
     pub env: Vec<(String, String)>,
     pub timeout_ms: u64,
+    // Defaults to true. Set false to continue if the API client disconnects.
+    pub kill_on_disconnect: bool,
     pub limits: ResourceLimits,
     pub result_policy: ResultPolicy,
     pub cleanup_policy: CleanupPolicy,

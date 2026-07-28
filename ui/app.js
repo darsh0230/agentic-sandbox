@@ -9,7 +9,7 @@ const maxUploadBytes = 24 * 1024 * 1024;
 
 const defaults = {
   command: "pi --workspace /home/agent --input /home/agent/input/task.md",
-  task: "Complete the requested task. Write structured final output to /home/agent/.pi/result.json and any artifacts under /home/agent/output.",
+  task: "Complete the requested task. Write structured final output to /home/agent/result.json and any artifacts under /home/agent/output.",
 };
 
 function init() {
@@ -67,6 +67,7 @@ function buildRequest(injectedFiles = []) {
     injected_readonly_dirs: [],
     env: [],
     timeout_ms: Number($("timeoutMs").value || 300000),
+    kill_on_disconnect: true,
     limits: {
       stdout_max_bytes: 262144,
       stderr_max_bytes: 262144,

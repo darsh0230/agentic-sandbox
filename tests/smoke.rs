@@ -7,4 +7,5 @@ fn request_accepts_content_utf8_alias() {
     }"#;
     let req: pi_sandbox_master::types::AgentRunRequest = serde_json::from_str(raw).unwrap();
     assert_eq!(req.injected_files[0].content, b"hello");
+    assert!(req.kill_on_disconnect);
 }

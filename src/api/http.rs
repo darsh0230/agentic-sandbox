@@ -1,6 +1,8 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use anyhow::Result;
 use axum::body::Body;
@@ -10,7 +12,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::Stream;
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::ReceiverStream;
@@ -53,6 +55,27 @@ enum RunLine<'a> {
     Error {
         message: String,
     },
+}
+
+struct RunBodyStream {
+    inner: ReceiverStream<String>,
+    disconnected_tx: watch::Sender<bool>,
+}
+
+impl Stream for RunBodyStream {
+    type Item = std::result::Result<Bytes, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner)
+            .poll_next(cx)
+            .map(|line| line.map(|line| Ok(Bytes::from(line))))
+    }
+}
+
+impl Drop for RunBodyStream {
+    fn drop(&mut self) {
+        let _ = self.disconnected_tx.send(true);
+    }
 }
 
 pub async fn serve_http(config: HttpConfig, master: Master) -> Result<()> {
@@ -169,8 +192,10 @@ async fn run_agent(
     });
     drop(line_tx);
 
-    let stream =
-        ReceiverStream::new(line_rx).map(|line| Ok::<Bytes, Infallible>(Bytes::from(line)));
+    let stream = RunBodyStream {
+        inner: ReceiverStream::new(line_rx),
+        disconnected_tx,
+    };
     (
         [
             (header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"),
@@ -251,7 +276,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::RunLine;
+    use super::{RunBodyStream, RunLine};
     use crate::types::AgentRunEvent;
 
     #[test]
@@ -271,5 +296,20 @@ mod tests {
     fn heartbeat_has_stable_wire_format() {
         let line = serde_json::to_string(&RunLine::Heartbeat).unwrap();
         assert_eq!(line, r#"{"type":"heartbeat"}"#);
+    }
+
+    #[tokio::test]
+    async fn dropping_http_response_body_reports_disconnect() {
+        let (_line_tx, line_rx) = tokio::sync::mpsc::channel(1);
+        let (disconnected_tx, mut disconnected_rx) = tokio::sync::watch::channel(false);
+        let stream = RunBodyStream {
+            inner: tokio_stream::wrappers::ReceiverStream::new(line_rx),
+            disconnected_tx,
+        };
+
+        drop(stream);
+        disconnected_rx.changed().await.unwrap();
+
+        assert!(*disconnected_rx.borrow());
     }
 }

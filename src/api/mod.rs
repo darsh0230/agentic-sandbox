@@ -191,4 +191,22 @@ mod tests {
         drop(tx);
         stream_task.await.unwrap().unwrap();
     }
+
+    #[tokio::test]
+    async fn unix_disconnect_closes_the_run_event_receiver() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let stream_task = tokio::spawn(stream_run_events_with_interval(
+            server,
+            rx,
+            Duration::from_millis(5),
+        ));
+
+        drop(client);
+        tokio::time::timeout(Duration::from_millis(100), tx.closed())
+            .await
+            .expect("event receiver should close after the heartbeat write fails");
+
+        assert!(stream_task.await.unwrap().is_err());
+    }
 }

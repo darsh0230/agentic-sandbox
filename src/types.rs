@@ -15,6 +15,8 @@ pub struct AgentRunRequest {
     pub inject_headers: Vec<HeaderOverrideRule>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_true")]
+    pub kill_on_disconnect: bool,
     #[serde(default)]
     pub limits: ResourceLimits,
     #[serde(default)]
@@ -158,7 +160,7 @@ fn default_true() -> bool {
     true
 }
 fn default_result_file() -> Option<String> {
-    Some(".pi/result.json".to_string())
+    Some("result.json".to_string())
 }
 
 mod bytes_as_vec {
@@ -205,5 +207,27 @@ mod bytes_as_vec {
             }
         }
         deserializer.deserialize_any(Visitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentRunRequest;
+
+    #[test]
+    fn kill_on_disconnect_defaults_to_true() {
+        let request: AgentRunRequest =
+            serde_json::from_str(r#"{"run_id":"r","command":["true"]}"#).unwrap();
+
+        assert!(request.kill_on_disconnect);
+    }
+
+    #[test]
+    fn kill_on_disconnect_can_be_disabled() {
+        let request: AgentRunRequest =
+            serde_json::from_str(r#"{"run_id":"r","command":["true"],"kill_on_disconnect":false}"#)
+                .unwrap();
+
+        assert!(!request.kill_on_disconnect);
     }
 }

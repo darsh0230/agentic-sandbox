@@ -471,6 +471,10 @@ The master should stream events while the agent runs:
 
 ```rust
 pub enum AgentRunEvent {
+    WaitingForSlot {
+        position: usize,
+        max_waiting: usize,
+    },
     Started {
         run_id: String,
         slot_id: String,

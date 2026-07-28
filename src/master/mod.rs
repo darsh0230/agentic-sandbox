@@ -7,6 +7,7 @@ pub mod workspace;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::{Mutex, mpsc};
@@ -19,7 +20,7 @@ use crate::proxy::mitm::{PRIVILEGED_CA_PATH, WORKSPACE_CA_RELATIVE_PATH};
 use crate::sandbox::{IsolationMode, OutputStream, SandboxLaunchConfig, SandboxLauncher, SlotSpec};
 use crate::types::{AgentRunEvent, AgentRunRequest, AgentRunResult, CleanupPolicy};
 
-use self::allocator::SlotAllocator;
+use self::allocator::{SlotAllocation, SlotAllocator};
 use self::injector::Injector;
 use self::result_collector::ResultCollector;
 use self::workspace::WorkspaceManager;
@@ -43,14 +44,36 @@ impl Master {
         isolation_mode: IsolationMode,
         proxy: Option<ProxyHandle>,
     ) -> Result<Self> {
+        let max_waiting = usize::from(slot_count)
+            .checked_mul(allocator::DEFAULT_MAX_WAITING_PER_SLOT)
+            .expect("validated slot count cannot overflow usize");
+        Self::new_with_max_waiting(root, slot_count, max_waiting, isolation_mode, proxy).await
+    }
+
+    pub async fn new_with_max_waiting(
+        root: PathBuf,
+        slot_count: u16,
+        max_waiting: usize,
+        isolation_mode: IsolationMode,
+        proxy: Option<ProxyHandle>,
+    ) -> Result<Self> {
         WorkspaceManager::prepare_root(&root, isolation_mode).await?;
         let planned_slots = SlotAllocator::planned_slots(&root.join("workspaces"), slot_count)?;
         if isolation_mode == IsolationMode::User {
             validate_user_mode_slots(&planned_slots)?;
         }
-        info!(%isolation_mode, slots = slot_count, "sandbox isolation mode configured");
+        info!(
+            %isolation_mode,
+            slots = slot_count,
+            max_waiting,
+            "sandbox isolation mode configured"
+        );
         Ok(Self {
-            allocator: Arc::new(SlotAllocator::new(root.join("workspaces"), slot_count)?),
+            allocator: Arc::new(SlotAllocator::with_max_waiting(
+                root.join("workspaces"),
+                slot_count,
+                max_waiting,
+            )?),
             workspace: Arc::new(WorkspaceManager::new(root.clone())),
             injector: Arc::new(Injector::new()),
             collector: Arc::new(ResultCollector::new()),
@@ -70,13 +93,56 @@ impl Master {
         if self.proxy.is_none() && !req.inject_headers.is_empty() {
             bail!("inject_headers requires proxy support; remove --disable-proxy");
         }
-        let slot = self.allocator.allocate().await?;
-        let slot_spec = SlotSpec::from(&slot);
-        info!(run_id = %req.run_id, slot = %slot.id, isolation_mode = %self.isolation_mode, "allocated sandbox slot");
+        let allocation = self.allocator.begin_allocate()?;
+        let slot_lease = match allocation {
+            SlotAllocation::Ready(lease) => lease,
+            SlotAllocation::Waiting(waiter) => {
+                let status = waiter.status();
+                let queued_at = Instant::now();
+                info!(
+                    run_id = %req.run_id,
+                    position = status.position,
+                    max_waiting = status.max_waiting,
+                    "run waiting for sandbox slot"
+                );
+                let lease = if let Some(tx) = &events {
+                    tx.send(AgentRunEvent::WaitingForSlot {
+                        position: status.position,
+                        max_waiting: status.max_waiting,
+                    })
+                    .await
+                    .context("event stream closed while entering sandbox wait queue")?;
 
-        let outcome = self.run_agent_in_slot(req, slot_spec, events).await;
-        self.allocator.release(slot).await;
-        outcome
+                    tokio::select! {
+                        lease = waiter.wait() => lease?,
+                        _ = tx.closed() => {
+                            bail!("client disconnected while waiting for a sandbox slot");
+                        }
+                    }
+                } else {
+                    waiter.wait().await?
+                };
+                info!(
+                    run_id = %req.run_id,
+                    slot = %lease.slot().id,
+                    waited_ms = queued_at.elapsed().as_millis(),
+                    "allocated queued sandbox slot"
+                );
+                lease
+            }
+        };
+        let slot_spec = SlotSpec::from(slot_lease.slot());
+        info!(run_id = %req.run_id, slot = %slot_lease.slot().id, isolation_mode = %self.isolation_mode, "allocated sandbox slot");
+
+        // Once a sandbox owns a slot, keep its execution task alive even if the
+        // request handler is canceled. Returning the slot while its process is
+        // still running could let two runs overlap in the same workspace.
+        let master = self.clone();
+        let run_task = tokio::spawn(async move {
+            let _slot_lease = slot_lease;
+            master.run_agent_in_slot(req, slot_spec, events).await
+        });
+        run_task.await.context("sandbox execution task failed")?
     }
 
     async fn run_agent_in_slot(

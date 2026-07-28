@@ -96,6 +96,10 @@ pub enum CleanupPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentRunEvent {
+    WaitingForSlot {
+        position: usize,
+        max_waiting: usize,
+    },
     Started {
         run_id: String,
         slot_id: String,

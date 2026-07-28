@@ -28,6 +28,9 @@ enum Command {
         root: PathBuf,
         #[arg(long, default_value_t = 8)]
         slots: u16,
+        /// Maximum requests allowed to wait for a slot (default: 10 × --slots).
+        #[arg(long, env = "PI_SANDBOX_MAX_WAITING")]
+        max_waiting: Option<usize>,
         #[arg(long, default_value = "/var/lib/pi-sandbox/state/master.sock")]
         socket: PathBuf,
         #[arg(long)]
@@ -90,6 +93,7 @@ async fn main() -> Result<()> {
         Command::Serve {
             root,
             slots,
+            max_waiting,
             socket,
             config,
             http,
@@ -114,7 +118,13 @@ async fn main() -> Result<()> {
                 proxy_ca_key,
             )
             .await?;
-            let master = Master::new(root, slots, isolation, proxy).await?;
+            let max_waiting = max_waiting.unwrap_or_else(|| {
+                usize::from(slots)
+                    .checked_mul(pi_sandbox_master::master::allocator::DEFAULT_MAX_WAITING_PER_SLOT)
+                    .expect("validated slot count cannot overflow usize")
+            });
+            let master =
+                Master::new_with_max_waiting(root, slots, max_waiting, isolation, proxy).await?;
             if let Some(addr) = http {
                 let http_master = master.clone();
                 tokio::select! {

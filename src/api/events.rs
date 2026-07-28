@@ -1,4 +1,7 @@
 use std::collections::VecDeque;
+use std::time::Duration;
+
+pub(crate) const RUN_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct TailBuffer {

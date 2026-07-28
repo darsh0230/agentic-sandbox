@@ -66,6 +66,20 @@ Send one JSON request per line:
 {"type":"run","request":{"run_id":"smoke-001","command":["bash","-lc","whoami; id; mkdir -p .pi output; echo '{\"status\":\"ok\"}' > .pi/result.json; echo ok > output/result.txt"],"injected_files":[{"relative_path":"input/task.md","content_utf8":"write ok","mode":420}],"result_policy":{"collect_paths":["output/result.txt"],"result_file":".pi/result.json"}}}
 ```
 
+## Slot wait queue
+
+When every sandbox slot is busy, run requests wait in FIFO order instead of
+failing immediately. The default queue limit is ten waiting requests per slot
+(80 with the default eight slots). Set an explicit limit with
+`--max-waiting <COUNT>` or `PI_SANDBOX_MAX_WAITING`; use `0` to disable
+waiting. Requests beyond the limit receive an error response.
+
+A queued request receives a `waiting_for_slot` event with its position at the
+time it entered the queue and the configured limit. HTTP and Unix-socket run
+streams both send `{"type":"heartbeat"}` every 15 seconds while waiting and
+while running. If a client disconnects while queued, its reservation is
+removed so it does not consume queue capacity.
+
 ## Running your Pi agent
 
 The UI sends `AgentRunRequest.command` exactly as an argv vector. The default command is:

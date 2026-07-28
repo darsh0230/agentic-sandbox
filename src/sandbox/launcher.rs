@@ -76,12 +76,25 @@ impl SandboxChild {
     }
 
     pub async fn kill(&mut self) -> Result<()> {
+        self.signal_kill();
+        self.child.kill().await.ok();
+        Ok(())
+    }
+
+    fn signal_kill(&mut self) {
         #[cfg(unix)]
         if let Some(pid) = self.child.id() {
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         }
-        self.child.kill().await.ok();
-        Ok(())
+        self.child.start_kill().ok();
+    }
+}
+
+impl Drop for SandboxChild {
+    fn drop(&mut self) {
+        // A canceled or panicking execution task must not leave a process using
+        // a slot that is about to be returned to the allocator.
+        self.signal_kill();
     }
 }
 

@@ -207,6 +207,9 @@ function handleLine(line) {
 
 function renderRunEvent(event) {
   switch (event.type) {
+    case "waiting_for_slot":
+      appendEvent("queued", `Position ${event.position} (queue limit ${event.max_waiting})`);
+      break;
     case "started":
       appendEvent("started", `${event.run_id} on ${event.slot_id}, pid ${event.pid}`);
       break;

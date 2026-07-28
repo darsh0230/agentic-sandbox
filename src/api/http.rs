@@ -1,7 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use axum::body::Body;
@@ -17,14 +16,13 @@ use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::info;
 
+use crate::api::events::RUN_STREAM_HEARTBEAT_INTERVAL;
 use crate::master::Master;
 use crate::types::{AgentRunEvent, AgentRunRequest};
 
 const INDEX_HTML: &str = include_str!("../../ui/index.html");
 const APP_CSS: &str = include_str!("../../ui/app.css");
 const APP_JS: &str = include_str!("../../ui/app.js");
-const RUN_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-
 #[derive(Clone)]
 pub struct HttpConfig {
     pub addr: SocketAddr,
@@ -114,21 +112,38 @@ async fn run_agent(
     let (line_tx, line_rx) = mpsc::channel::<String>(128);
     let (event_tx, mut event_rx) = mpsc::channel::<AgentRunEvent>(128);
     let (done_tx, done_rx) = watch::channel(false);
+    let (disconnected_tx, disconnected_rx) = watch::channel(false);
     let master = state.master.clone();
 
     let heartbeat_line_tx = line_tx.clone();
+    let heartbeat_disconnected_tx = disconnected_tx.clone();
     tokio::spawn(async move {
-        send_heartbeats(heartbeat_line_tx, done_rx).await;
+        send_heartbeats(heartbeat_line_tx, done_rx, heartbeat_disconnected_tx).await;
     });
 
     let event_line_tx = line_tx.clone();
+    let mut event_disconnected_rx = disconnected_rx;
+    let event_disconnected_tx = disconnected_tx.clone();
     tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            if send_line(&event_line_tx, &RunLine::Event { event: &event })
-                .await
-                .is_err()
-            {
-                return;
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    let Some(event) = event else {
+                        return;
+                    };
+                    if send_line(&event_line_tx, &RunLine::Event { event: &event })
+                        .await
+                        .is_err()
+                    {
+                        let _ = event_disconnected_tx.send(true);
+                        return;
+                    }
+                }
+                changed = event_disconnected_rx.changed() => {
+                    if changed.is_err() || *event_disconnected_rx.borrow() {
+                        return;
+                    }
+                }
             }
         }
     });
@@ -167,7 +182,11 @@ async fn run_agent(
         .into_response()
 }
 
-async fn send_heartbeats(tx: mpsc::Sender<String>, mut done_rx: watch::Receiver<bool>) {
+async fn send_heartbeats(
+    tx: mpsc::Sender<String>,
+    mut done_rx: watch::Receiver<bool>,
+    disconnected_tx: watch::Sender<bool>,
+) {
     let mut interval = tokio::time::interval(RUN_STREAM_HEARTBEAT_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await;
@@ -179,6 +198,7 @@ async fn send_heartbeats(tx: mpsc::Sender<String>, mut done_rx: watch::Receiver<
                     return;
                 }
                 if send_line(&tx, &RunLine::Heartbeat).await.is_err() {
+                    let _ = disconnected_tx.send(true);
                     return;
                 }
             }
@@ -227,4 +247,29 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         .zip(right.iter())
         .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
         == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunLine;
+    use crate::types::AgentRunEvent;
+
+    #[test]
+    fn queue_event_uses_http_run_line_envelope() {
+        let event = AgentRunEvent::WaitingForSlot {
+            position: 3,
+            max_waiting: 80,
+        };
+        let line = serde_json::to_string(&RunLine::Event { event: &event }).unwrap();
+        assert_eq!(
+            line,
+            r#"{"type":"event","event":{"type":"waiting_for_slot","position":3,"max_waiting":80}}"#
+        );
+    }
+
+    #[test]
+    fn heartbeat_has_stable_wire_format() {
+        let line = serde_json::to_string(&RunLine::Heartbeat).unwrap();
+        assert_eq!(line, r#"{"type":"heartbeat"}"#);
+    }
 }

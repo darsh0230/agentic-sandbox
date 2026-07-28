@@ -30,8 +30,8 @@ The checked-in Compose file uses `change-me-dev-token` only as a fallback and
 passes through `AGENTIC_SANDBOX_HTTP_TOKEN`, `AGENTIC_SANDBOX_RUST_LOG`, and
 `AGENTIC_SANDBOX_HTTP_PORT` when they are set in the shell. Both profiles share
 the state volume and host port, so do not start them simultaneously. User mode
-omits `SYS_ADMIN` and the unconfined container seccomp override; privileged mode
-enables both for namespace and mount setup.
+omits `SYS_ADMIN` and the unconfined container seccomp/AppArmor overrides;
+privileged mode enables them for namespace and mount setup.
 
 ## Direct Docker: privileged mode
 
@@ -53,6 +53,7 @@ docker run --rm -it \
   --cap-add=DAC_OVERRIDE \
   --cap-add=KILL \
   --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
   --tmpfs /run:rw,nosuid,nodev,size=64m \
   --tmpfs /tmp:rw,nosuid,nodev,size=256m \
   -e AGENTIC_SANDBOX_HTTP_TOKEN=replace-with-a-secret \
@@ -62,12 +63,12 @@ docker run --rm -it \
   agentic-sandbox serve --isolation privileged --http 0.0.0.0:8080
 ```
 
-`seccomp=unconfined` is a development convenience because Docker's default
-container profile can block namespace and mount setup. For production, start from
-Docker's default profile and allow only the trusted control plane's required setup
-calls: `unshare`, `mount`, `umount2`, and `pivot_root`. Do not block the API
-listener syscalls at container level; the child installs its own filter after
-dropping privileges.
+The unconfined seccomp and AppArmor settings are development conveniences because
+Docker's default profiles can block namespace and mount setup. For production,
+replace them with reviewed control-plane profiles that permit only the required
+setup operations, including `unshare`, `mount`, `umount2`, and `pivot_root`. Do
+not block the API listener syscalls at container level; the child installs its own
+filter after dropping privileges.
 
 ## Direct Docker: user mode
 
@@ -92,7 +93,7 @@ docker run --rm -it \
   agentic-sandbox serve --http 0.0.0.0:8080
 ```
 
-This mode does not need `CAP_SYS_ADMIN` or an unconfined container seccomp profile,
+This mode does not need `CAP_SYS_ADMIN` or unconfined container security profiles,
 but it is a substantially weaker isolation boundary. See
 [Security](security.md#user-mode).
 

@@ -61,6 +61,7 @@ services:
       - KILL
     security_opt:
       - seccomp=unconfined
+      - apparmor=unconfined
     environment:
       <<: *agentic-sandbox-environment
       AGENTIC_SANDBOX_ISOLATION: privileged

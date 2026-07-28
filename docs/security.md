@@ -36,7 +36,7 @@ changes to a slot UID/GID, enables `no_new_privs`, and loads a seccomp deny-list
 It requires the trusted control plane to hold powerful container capabilities,
 including `CAP_SYS_ADMIN` for mount setup. A control-plane compromise can therefore
 be severe. The development Compose profile also disables the container-wide
-seccomp policy so setup syscalls work.
+seccomp and AppArmor policies so setup syscalls work.
 
 Privileged mode does not create:
 
@@ -167,7 +167,8 @@ explicit allow-list.
 - Do not set a root password or enable interactive login in the image.
 - Pin base-image digests, Rust dependencies, and globally installed agent tools for
   release builds.
-- Replace `seccomp=unconfined` with a reviewed control-plane profile.
+- Replace the unconfined seccomp and AppArmor settings with reviewed
+  control-plane profiles.
 - Drop every container capability that the selected isolation mode does not need.
 - Apply container-level CPU, memory, PID, and filesystem limits.
 - Restrict egress at the container or orchestrator network layer.

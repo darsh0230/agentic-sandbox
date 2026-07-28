@@ -1283,7 +1283,9 @@ impl DockerResources {
                 .arg("--cap-add")
                 .arg("SYS_ADMIN")
                 .arg("--security-opt")
-                .arg("seccomp=unconfined");
+                .arg("seccomp=unconfined")
+                .arg("--security-opt")
+                .arg("apparmor=unconfined");
         }
         command
             .arg("--tmpfs")

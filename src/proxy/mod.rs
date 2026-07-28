@@ -57,14 +57,16 @@ pub struct ProxyRunRegistration {
 
 impl ProxyHandle {
     pub async fn start(config: ProxyConfig) -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
+        let listen_addr = listener.local_addr()?;
         let contexts = Arc::new(RwLock::new(HashMap::new()));
         let handle = Self {
-            listen_addr: config.listen_addr,
+            listen_addr,
             global_rules: Arc::new(config.global_rules),
             contexts,
             mitm: config.mitm.map(|config| Arc::new(config.authority)),
         };
-        server::spawn(handle.clone()).await?;
+        server::spawn(handle.clone(), listener).await?;
         info!(listen_addr = %handle.listen_addr, global_rules = handle.global_rules.len(), "proxy server started");
         Ok(handle)
     }
@@ -148,5 +150,85 @@ impl Drop for ProxyRunRegistration {
         {
             info!(run_id = %context.run_id, slot_id = %context.slot_id, "proxy run context unregistered");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handle() -> ProxyHandle {
+        ProxyHandle {
+            listen_addr: "127.0.0.1:18080".parse().unwrap(),
+            global_rules: Arc::new(Vec::new()),
+            contexts: Arc::new(RwLock::new(HashMap::new())),
+            mitm: None,
+        }
+    }
+
+    #[test]
+    fn registration_creates_scoped_proxy_environment_and_drop_expires_token() {
+        let handle = handle();
+        let registration = handle.register_run("run-1", "slot-1", &[]).unwrap();
+        let token = registration.token.clone();
+
+        assert_eq!(token.len(), 48);
+        assert!(token.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        let context = handle.run_context(&token).unwrap();
+        assert_eq!(context.run_id, "run-1");
+        assert_eq!(context.slot_id, "slot-1");
+        assert!(context.rules.is_empty());
+        assert_eq!(
+            registration.env(),
+            vec![
+                (
+                    "HTTP_PROXY".into(),
+                    format!("http://run:{token}@127.0.0.1:18080"),
+                ),
+                (
+                    "HTTPS_PROXY".into(),
+                    format!("http://run:{token}@127.0.0.1:18080"),
+                ),
+                (
+                    "ALL_PROXY".into(),
+                    format!("http://run:{token}@127.0.0.1:18080"),
+                ),
+                ("NO_PROXY".into(), "127.0.0.1,localhost,::1".into()),
+            ]
+        );
+
+        drop(registration);
+        assert!(handle.run_context(&token).is_none());
+    }
+
+    #[test]
+    fn invalid_registration_does_not_create_a_context() {
+        let handle = handle();
+        let invalid = HeaderOverrideRule {
+            endpoint: "http://example.com/*".into(),
+            override_header_key: Some("Host".into()),
+            override_header_value: Some("forbidden".into()),
+            http_proxy: None,
+            https_proxy: None,
+        };
+
+        assert!(handle.register_run("run-1", "slot-1", &[invalid]).is_err());
+        assert!(handle.contexts.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn registrations_use_distinct_tokens_and_drop_independently() {
+        let handle = handle();
+        let first = handle.register_run("run-1", "slot-1", &[]).unwrap();
+        let second = handle.register_run("run-2", "slot-2", &[]).unwrap();
+        assert_ne!(first.token, second.token);
+
+        let first_token = first.token.clone();
+        let second_token = second.token.clone();
+        drop(first);
+        assert!(handle.run_context(&first_token).is_none());
+        assert!(handle.run_context(&second_token).is_some());
+        drop(second);
+        assert!(handle.run_context(&second_token).is_none());
     }
 }

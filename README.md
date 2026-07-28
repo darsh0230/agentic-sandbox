@@ -92,12 +92,25 @@ real sandbox setup is Linux-specific.
 
 ```bash
 cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 docker compose config --quiet
 ```
 
 The proxy integration tests bind loopback sockets and may require local-network
 permission in restricted development environments.
+
+The Docker-backed E2E suite is intentionally ignored by the default test run. It
+builds a lean Linux image, owns disposable user- and privileged-isolation
+containers, and validates HTTP authentication, artifacts, timeouts, queueing,
+heartbeats, disconnect cancellation, process-tree cleanup, and slot reuse:
+
+```bash
+cargo test --test docker_e2e -- --ignored --test-threads=1
+```
+
+This command requires a working Docker daemon and can take over a minute because
+one queue test waits for the production 15-second heartbeat.
 
 ## Vibe-coded project
 

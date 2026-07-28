@@ -15,16 +15,11 @@ use crate::types::InjectedDir;
 
 pub use launcher::{SandboxChild, SandboxLauncher};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum IsolationMode {
+    #[default]
     Privileged,
     User,
-}
-
-impl Default for IsolationMode {
-    fn default() -> Self {
-        Self::Privileged
-    }
 }
 
 impl std::fmt::Display for IsolationMode {
@@ -80,13 +75,41 @@ pub struct SandboxLaunchConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::IsolationMode;
+    use super::{IsolationMode, SlotSpec};
+    use crate::master::allocator::Slot;
 
     #[test]
     fn parses_isolation_mode_values() {
         assert_eq!("privileged".parse(), Ok(IsolationMode::Privileged));
         assert_eq!("user".parse(), Ok(IsolationMode::User));
-        assert!("auto".parse::<IsolationMode>().is_err());
+        for invalid in ["auto", "", "USER", " user", "user "] {
+            assert_eq!(
+                invalid.parse::<IsolationMode>().unwrap_err(),
+                "isolation must be one of: privileged, user"
+            );
+        }
+    }
+
+    #[test]
+    fn isolation_mode_default_and_display_are_stable() {
+        assert_eq!(IsolationMode::default(), IsolationMode::Privileged);
+        assert_eq!(IsolationMode::Privileged.to_string(), "privileged");
+        assert_eq!(IsolationMode::User.to_string(), "user");
+    }
+
+    #[test]
+    fn slot_spec_copies_allocator_slot_identity() {
+        let slot = Slot {
+            id: "slot-0042".into(),
+            uid: 10_042,
+            gid: 20_042,
+            workspace_path: "/srv/workspaces/slot-0042".into(),
+        };
+        let spec = SlotSpec::from(&slot);
+        assert_eq!(spec.id, slot.id);
+        assert_eq!(spec.uid, slot.uid);
+        assert_eq!(spec.gid, slot.gid);
+        assert_eq!(spec.workspace_path, slot.workspace_path);
     }
 }
 

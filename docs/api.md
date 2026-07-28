@@ -42,9 +42,10 @@ The examples abbreviate the final result. Actual result objects include every fi
 documented below.
 
 The HTTP API is a development interface. It has bearer-token authentication but no
-TLS, rate limiting, or authorization scopes. JSON requests currently inherit
-Axum's default body limit (2 MiB); there is no project-specific upload policy.
-Keep it on loopback or place it behind a trusted authenticated gateway.
+TLS, rate limiting, or authorization scopes. `POST /api/run` requires
+`Content-Type: application/json` and enforces a 2 MiB body limit. Authentication
+is checked before the request body is buffered. Keep it on loopback or place it
+behind a trusted authenticated gateway.
 
 ## Unix-socket API
 
@@ -126,7 +127,7 @@ Full example:
 
 | Field | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `run_id` | yes | — | Non-empty path-safe identifier; `/`, `..`, and NUL are rejected |
+| `run_id` | yes | — | One path-safe component, at most 128 bytes; separators, `..`, NUL, and control characters are rejected |
 | `command` | yes | — | Exact argv vector; no implicit shell |
 | `injected_files` | no | `[]` | Files written below the workspace |
 | `injected_readonly_dirs` | no | `[]` | Privileged mode only; host source bound at an absolute sandbox path |
@@ -142,8 +143,11 @@ Full example:
 accepts a UTF-8 string and is more convenient for text. File modes are numeric;
 decimal `420` is octal `0644`.
 
-The browser currently allows selecting up to 24 MiB of files, but the HTTP server's
-default JSON body limit is smaller. Treat 2 MiB as the effective total request
+Unknown fields in the request and its nested request objects are rejected. This
+prevents misspelled security or timeout settings from being silently ignored.
+
+The browser currently allows selecting up to 24 MiB of files, but the HTTP
+server's JSON body limit is smaller. Treat 2 MiB as the effective total request
 limit until the UI and server limits are aligned.
 
 Cleanup policy values:
@@ -158,6 +162,10 @@ Cleanup policy values:
 `result_policy.result_file` is parsed as JSON and placed in `result_json`; it
 defaults to `result.json`. A missing or invalid JSON file produces `null`. Set the
 field to `null` to disable structured-result parsing.
+
+At most 256 paths may be collected. Each collected file and the structured result
+file are limited to 16 MiB, and collected files are limited to 64 MiB in total.
+Symlinks that resolve outside the workspace are omitted.
 
 The result object contains:
 

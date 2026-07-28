@@ -13,6 +13,8 @@ pub struct SandboxLauncher;
 pub struct SandboxChild {
     child: Child,
     output_rx: mpsc::Receiver<OutputChunk>,
+    pid: i32,
+    process_tree_signaled: bool,
 }
 
 impl SandboxLauncher {
@@ -45,6 +47,10 @@ impl SandboxLauncher {
                 anyhow::anyhow!(err)
             }
         })?;
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("spawned child did not expose a process id"))?
+            as i32;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let (tx, output_rx) = mpsc::channel(64);
@@ -54,13 +60,18 @@ impl SandboxLauncher {
         if let Some(stderr) = stderr {
             spawn_reader(stderr, OutputStream::Stderr, tx);
         }
-        Ok(SandboxChild { child, output_rx })
+        Ok(SandboxChild {
+            child,
+            output_rx,
+            pid,
+            process_tree_signaled: false,
+        })
     }
 }
 
 impl SandboxChild {
     pub fn pid(&self) -> i32 {
-        self.child.id().unwrap_or_default() as i32
+        self.pid
     }
 
     pub async fn next_output(&mut self) -> Option<OutputChunk> {
@@ -82,9 +93,17 @@ impl SandboxChild {
     }
 
     fn signal_kill(&mut self) {
+        if self.process_tree_signaled {
+            return;
+        }
+        self.process_tree_signaled = true;
         #[cfg(unix)]
-        if let Some(pid) = self.child.id() {
-            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        if self.pid > 0 {
+            // The direct child may already have been reaped, at which point
+            // tokio::process::Child::id returns None. Its original process
+            // group can still contain live descendants, so retain the spawn
+            // PID and always target that group exactly once.
+            unsafe { libc::kill(-self.pid, libc::SIGKILL) };
         }
         self.child.start_kill().ok();
     }
@@ -163,7 +182,7 @@ fn configure_platform(
             result.map_err(|err| {
                 let message = format!("{err:#}");
                 let _ = std::fs::write(&setup_error_path, &message);
-                std::io::Error::new(std::io::ErrorKind::Other, message)
+                std::io::Error::other(message)
             })
         });
     }
@@ -172,8 +191,11 @@ fn configure_platform(
 
 #[cfg(target_os = "linux")]
 fn prepare_user_mode(config: &SandboxLaunchConfig) -> Result<()> {
-    unsafe {
-        libc::setpgid(0, 0);
+    if unsafe { libc::setpgid(0, 0) } != 0 {
+        return Err(anyhow::anyhow!(
+            "create child process group: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     crate::sandbox::credentials::drop_to_agent(config.slot.uid, config.slot.gid)
         .map_err(|err| anyhow::anyhow!("drop to slot uid/gid: {err}"))?;
@@ -193,4 +215,73 @@ fn configure_platform(
 ) -> Result<()> {
     command.current_dir(&config.slot.workspace_path);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::{IsolationMode, SlotSpec};
+    use tokio::io::AsyncWriteExt;
+
+    fn config(command: Vec<String>) -> SandboxLaunchConfig {
+        SandboxLaunchConfig {
+            run_id: "test-run".into(),
+            root: "/tmp/agentic-sandbox-test".into(),
+            slot: SlotSpec {
+                id: "slot-test".into(),
+                uid: 0,
+                gid: 0,
+                workspace_path: "/tmp".into(),
+            },
+            isolation_mode: IsolationMode::User,
+            command,
+            env: vec![],
+            injected_readonly_dirs: vec![],
+        }
+    }
+
+    #[test]
+    fn rejects_an_empty_command_before_platform_setup() {
+        let error = SandboxLauncher::spawn(config(Vec::new()))
+            .err()
+            .expect("empty command must fail");
+        assert_eq!(error.to_string(), "command is empty");
+    }
+
+    #[tokio::test]
+    async fn output_reader_preserves_large_binary_streams() {
+        let (reader, mut writer) = tokio::io::duplex(32 * 1024);
+        let (tx, mut rx) = mpsc::channel(8);
+        spawn_reader(reader, OutputStream::Stdout, tx);
+        let expected = (0..20_000)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+
+        writer.write_all(&expected).await.unwrap();
+        writer.shutdown().await.unwrap();
+        let mut observed = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            assert!(matches!(chunk.stream, OutputStream::Stdout));
+            observed.extend(chunk.data);
+        }
+        assert_eq!(observed, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_status_preserves_exit_codes_and_signals() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let exited = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .status()
+            .unwrap();
+        let exited = exit_status_from(exited);
+        assert_eq!(exited.code, Some(7));
+        assert_eq!(exited.signal, None);
+
+        let signaled = exit_status_from(std::process::ExitStatus::from_raw(libc::SIGKILL));
+        assert_eq!(signaled.code, None);
+        assert_eq!(signaled.signal, Some(libc::SIGKILL));
+    }
 }

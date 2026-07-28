@@ -1,7 +1,9 @@
 # Runtime and configuration
 
-The supported deployment target is a Linux container. macOS and other Unix hosts
-can compile and run most tests, but they do not execute the Linux isolation setup.
+The supported deployment target is a Linux container on kernel 5.6 or newer.
+Secure artifact resolution uses `openat2`; startup or collection fails closed when
+that syscall is unavailable. macOS and other Unix hosts can compile and run most
+tests, but they do not execute the Linux isolation setup.
 
 ## Docker Compose
 
@@ -140,6 +142,7 @@ tokens.
 
 ```bash
 cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 docker compose config --quiet
 ```
@@ -151,6 +154,16 @@ cargo run -- --help
 cargo run -- serve --help
 ```
 
-Linux integration testing should additionally exercise both isolation modes
-inside the supplied container, because non-Linux tests use a lightweight launcher
-fallback and cannot validate namespace, mount, credential, or seccomp setup.
+Run the self-contained Linux E2E suite to exercise both isolation modes. The
+test builds `tests/e2e/Dockerfile`, uses unique container and image names, maps a
+dynamic loopback port, captures logs on failure, and removes its resources:
+
+```bash
+cargo test --test docker_e2e -- --ignored --test-threads=1
+```
+
+The E2E target is ignored during ordinary `cargo test` runs because it requires a
+Docker daemon, privileged container capabilities, and a deliberate wait through
+the production 15-second heartbeat interval. Non-Linux unit tests use a
+lightweight launcher fallback and cannot validate namespace, mount, credential,
+or seccomp setup.

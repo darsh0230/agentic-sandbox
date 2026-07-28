@@ -160,3 +160,33 @@ fn write_etc(root: &Path, uid: u32, gid: u32) -> Result<()> {
     )?;
     Ok(())
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_minimal_identity_and_name_service_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("etc")).unwrap();
+
+        write_etc(root.path(), 10_001, 20_001).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.path().join("etc/passwd")).unwrap(),
+            "root:x:0:0:root:/root:/usr/sbin/nologin\nagent:x:10001:20001:Agent:/home/agent:/bin/bash\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("etc/group")).unwrap(),
+            "root:x:0:\nagent:x:20001:\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("etc/hosts")).unwrap(),
+            "127.0.0.1 localhost\n::1 localhost ip6-localhost\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("etc/nsswitch.conf")).unwrap(),
+            "passwd: files\ngroup: files\nhosts: files dns\n"
+        );
+    }
+}

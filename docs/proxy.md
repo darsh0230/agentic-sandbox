@@ -142,6 +142,11 @@ The default CA files are:
 /var/lib/agentic-sandbox/state/proxy-ca-key.pem
 ```
 
+When both files already exist, startup verifies restrictive key permissions,
+certificate/key correspondence, and a generated leaf certificate chain. Material
+whose subject or CA constraints are incompatible with the generated interception
+certificates is rejected before the proxy starts.
+
 MITM changes the child's TLS trust and exposes decrypted traffic to the control
 plane. Enable it only when required, protect the CA private key, and review
 [Security](security.md#outbound-network-and-proxy).
@@ -150,4 +155,3 @@ plane. Enable it only when required, protect the CA private key, and review
 
 Use `--disable-proxy` or `AGENTIC_SANDBOX_DISABLE_PROXY=true`. Requests containing
 `inject_headers` are rejected while proxy support is disabled.
-

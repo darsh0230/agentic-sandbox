@@ -213,3 +213,87 @@ fn init_tracing() {
         .unwrap_or_else(|_| "agentic_sandbox=info,info".into());
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_cli_defaults_are_stable() {
+        let cli = Cli::try_parse_from(["agentic-sandbox", "serve"]).unwrap();
+        let Command::Serve { slots, socket, .. } = cli.command else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(slots, 8);
+        assert_eq!(
+            socket,
+            PathBuf::from("/var/lib/agentic-sandbox/state/master.sock")
+        );
+    }
+
+    #[test]
+    fn serve_cli_accepts_queue_http_and_isolation_overrides() {
+        let cli = Cli::try_parse_from([
+            "agentic-sandbox",
+            "serve",
+            "--slots",
+            "3",
+            "--max-waiting",
+            "0",
+            "--http",
+            "127.0.0.1:9000",
+            "--http-token",
+            "secret",
+            "--isolation",
+            "user",
+            "--disable-proxy",
+        ])
+        .unwrap();
+        let Command::Serve {
+            slots,
+            max_waiting,
+            http,
+            http_token,
+            isolation,
+            disable_proxy,
+            ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(slots, 3);
+        assert_eq!(max_waiting, Some(0));
+        assert_eq!(http, Some("127.0.0.1:9000".parse().unwrap()));
+        assert_eq!(http_token.as_deref(), Some("secret"));
+        assert_eq!(isolation, IsolationMode::User);
+        assert!(disable_proxy);
+    }
+
+    #[test]
+    fn cli_rejects_invalid_values_and_missing_run_json_request() {
+        assert!(
+            Cli::try_parse_from(["agentic-sandbox", "serve", "--slots", "not-a-number"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["agentic-sandbox", "serve", "--isolation", "automatic"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["agentic-sandbox", "run-json"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn disabling_proxy_short_circuits_config_and_mitm_loading() {
+        let result = start_proxy(
+            "127.0.0.1:0".parse().unwrap(),
+            Some(PathBuf::from("/definitely/missing/proxy.json")),
+            true,
+            true,
+            PathBuf::from("/definitely/missing/ca.pem"),
+            PathBuf::from("/definitely/missing/ca-key.pem"),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_none());
+    }
+}

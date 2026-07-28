@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentRunRequest {
     pub run_id: String,
     pub command: Vec<String>,
@@ -26,6 +27,7 @@ pub struct AgentRunRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HeaderOverrideRule {
     pub endpoint: String,
     #[serde(default)]
@@ -39,6 +41,7 @@ pub struct HeaderOverrideRule {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InjectedFile {
     pub relative_path: String,
     #[serde(with = "bytes_as_vec", alias = "content_utf8")]
@@ -48,6 +51,7 @@ pub struct InjectedFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InjectedDir {
     pub source_path: String,
     pub sandbox_path: String,
@@ -56,6 +60,7 @@ pub struct InjectedDir {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceLimits {
     pub memory_max_bytes: Option<u64>,
     pub pids_max: Option<u64>,
@@ -65,12 +70,14 @@ pub struct ResourceLimits {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CpuQuota {
     pub quota_us: u64,
     pub period_us: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResultPolicy {
     #[serde(default)]
     pub collect_paths: Vec<String>,
@@ -212,22 +219,287 @@ mod bytes_as_vec {
 
 #[cfg(test)]
 mod tests {
-    use super::AgentRunRequest;
+    use serde_json::{Value, json};
+
+    use super::{AgentRunEvent, AgentRunRequest, CleanupPolicy, InjectedFile, ResultPolicy};
 
     #[test]
-    fn kill_on_disconnect_defaults_to_true() {
+    fn minimal_request_populates_every_default() {
         let request: AgentRunRequest =
             serde_json::from_str(r#"{"run_id":"r","command":["true"]}"#).unwrap();
 
+        assert_eq!(request.run_id, "r");
+        assert_eq!(request.command, ["true"]);
+        assert!(request.injected_files.is_empty());
+        assert!(request.injected_readonly_dirs.is_empty());
+        assert!(request.env.is_empty());
+        assert!(request.inject_headers.is_empty());
+        assert_eq!(request.timeout_ms, 300_000);
         assert!(request.kill_on_disconnect);
+        assert!(request.limits.memory_max_bytes.is_none());
+        assert!(request.limits.pids_max.is_none());
+        assert!(request.limits.cpu_quota.is_none());
+        assert!(request.limits.stdout_max_bytes.is_none());
+        assert!(request.limits.stderr_max_bytes.is_none());
+        assert!(request.result_policy.collect_paths.is_empty());
+        assert_eq!(
+            request.result_policy.result_file.as_deref(),
+            Some("result.json")
+        );
+        assert_eq!(
+            request.cleanup_policy,
+            CleanupPolicy::DeleteWorkspaceAfterRun
+        );
     }
 
     #[test]
-    fn kill_on_disconnect_can_be_disabled() {
-        let request: AgentRunRequest =
-            serde_json::from_str(r#"{"run_id":"r","command":["true"],"kill_on_disconnect":false}"#)
-                .unwrap();
+    fn nested_request_types_apply_their_defaults() {
+        let request: AgentRunRequest = serde_json::from_value(json!({
+            "run_id": "r",
+            "command": ["true"],
+            "injected_files": [{
+                "relative_path": "input.txt",
+                "content": [1, 2, 3]
+            }],
+            "injected_readonly_dirs": [{
+                "source_path": "/fixtures",
+                "sandbox_path": "/opt/fixtures"
+            }],
+            "inject_headers": [{
+                "endpoint": "https://example.com/*"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(request.injected_files[0].mode, 0o600);
+        assert!(request.injected_readonly_dirs[0].readonly);
+        let header = &request.inject_headers[0];
+        assert!(header.override_header_key.is_none());
+        assert!(header.override_header_value.is_none());
+        assert!(header.http_proxy.is_none());
+        assert!(header.https_proxy.is_none());
+    }
+
+    #[test]
+    fn explicit_values_override_boolean_and_result_file_defaults() {
+        let request: AgentRunRequest = serde_json::from_value(json!({
+            "run_id": "r",
+            "command": ["true"],
+            "kill_on_disconnect": false,
+            "result_policy": {
+                "result_file": null
+            }
+        }))
+        .unwrap();
 
         assert!(!request.kill_on_disconnect);
+        assert_eq!(request.result_policy.result_file, None);
+    }
+
+    #[test]
+    fn injected_content_accepts_text_alias_text_field_and_byte_arrays() {
+        for (field, value, expected) in [
+            ("content_utf8", json!("héllo"), "héllo".as_bytes().to_vec()),
+            ("content", json!("text"), b"text".to_vec()),
+            ("content", json!([0, 1, 127, 255]), vec![0, 1, 127, 255]),
+            ("content", json!([]), Vec::new()),
+        ] {
+            let file: InjectedFile = serde_json::from_value(json!({
+                "relative_path": "input.bin",
+                field: value
+            }))
+            .unwrap();
+            assert_eq!(file.content, expected, "{field}");
+        }
+    }
+
+    #[test]
+    fn injected_binary_content_round_trips_under_the_canonical_field() {
+        let file = InjectedFile {
+            relative_path: "input.bin".into(),
+            content: vec![0, 128, 255],
+            mode: 0o640,
+        };
+
+        let encoded = serde_json::to_value(&file).unwrap();
+        assert_eq!(
+            encoded,
+            json!({
+                "relative_path": "input.bin",
+                "content": [0, 128, 255],
+                "mode": 416
+            })
+        );
+        let decoded: InjectedFile = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.relative_path, file.relative_path);
+        assert_eq!(decoded.content, file.content);
+        assert_eq!(decoded.mode, file.mode);
+    }
+
+    #[test]
+    fn injected_content_rejects_invalid_bytes_missing_content_and_alias_collisions() {
+        for value in [
+            Value::Null,
+            json!({}),
+            json!([-1]),
+            json!([256]),
+            json!([1.5]),
+            json!(["not-a-byte"]),
+        ] {
+            let result = serde_json::from_value::<InjectedFile>(json!({
+                "relative_path": "input.bin",
+                "content": value
+            }));
+            assert!(result.is_err());
+        }
+
+        assert!(
+            serde_json::from_value::<InjectedFile>(json!({
+                "relative_path": "input.bin"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<InjectedFile>(json!({
+                "relative_path": "input.bin",
+                "content": [1],
+                "content_utf8": "duplicate"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cleanup_policy_has_stable_case_sensitive_wire_values() {
+        for (policy, wire) in [
+            (
+                CleanupPolicy::DeleteWorkspaceAfterRun,
+                "DeleteWorkspaceAfterRun",
+            ),
+            (
+                CleanupPolicy::PreserveWorkspaceForDebug,
+                "PreserveWorkspaceForDebug",
+            ),
+            (
+                CleanupPolicy::PreserveWorkspaceOnFailure,
+                "PreserveWorkspaceOnFailure",
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(policy).unwrap(), json!(wire));
+            assert_eq!(
+                serde_json::from_value::<CleanupPolicy>(json!(wire)).unwrap(),
+                policy
+            );
+        }
+        assert!(
+            serde_json::from_value::<CleanupPolicy>(json!("preserve_workspace_for_debug")).is_err()
+        );
+    }
+
+    #[test]
+    fn run_events_have_stable_tagged_wire_formats() {
+        let cases = vec![
+            (
+                AgentRunEvent::WaitingForSlot {
+                    position: 2,
+                    max_waiting: 10,
+                },
+                json!({"type":"waiting_for_slot","position":2,"max_waiting":10}),
+            ),
+            (
+                AgentRunEvent::Started {
+                    run_id: "r".into(),
+                    slot_id: "slot-0001".into(),
+                    pid: 42,
+                },
+                json!({"type":"started","run_id":"r","slot_id":"slot-0001","pid":42}),
+            ),
+            (
+                AgentRunEvent::Stdout { data: vec![0, 255] },
+                json!({"type":"stdout","data":[0,255]}),
+            ),
+            (
+                AgentRunEvent::Stderr { data: vec![1, 2] },
+                json!({"type":"stderr","data":[1,2]}),
+            ),
+            (
+                AgentRunEvent::AgentEvent {
+                    json: json!({"nested":[true,null]}),
+                },
+                json!({"type":"agent_event","json":{"nested":[true,null]}}),
+            ),
+            (
+                AgentRunEvent::ResultFileFound {
+                    relative_path: "out.bin".into(),
+                    size: 9,
+                },
+                json!({"type":"result_file_found","relative_path":"out.bin","size":9}),
+            ),
+            (
+                AgentRunEvent::Exited {
+                    exit_code: None,
+                    signal: Some(9),
+                },
+                json!({"type":"exited","exit_code":null,"signal":9}),
+            ),
+            (AgentRunEvent::TimedOut, json!({"type":"timed_out"})),
+            (
+                AgentRunEvent::Failed {
+                    message: "boom".into(),
+                },
+                json!({"type":"failed","message":"boom"}),
+            ),
+        ];
+
+        for (event, expected) in cases {
+            assert_eq!(serde_json::to_value(&event).unwrap(), expected);
+            let decoded: AgentRunEvent = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn request_side_types_reject_unknown_fields_and_malformed_tuples() {
+        for request in [
+            json!({"run_id":"r","command":["true"],"timeuot_ms":1}),
+            json!({
+                "run_id":"r",
+                "command":["true"],
+                "limits":{"stdout_max_byte":1}
+            }),
+            json!({
+                "run_id":"r",
+                "command":["true"],
+                "result_policy":{"result_files":"result.json"}
+            }),
+            json!({"run_id":"r","command":["true"],"env":["BAD"]}),
+            json!({"run_id":"r","command":["true"],"env":[["ONLY_KEY"]]}),
+            json!({"run_id":"r","command":["true"],"env":[["A","B","C"]]}),
+        ] {
+            assert!(
+                serde_json::from_value::<AgentRunRequest>(request).is_err(),
+                "malformed request was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn unsigned_numeric_fields_reject_negative_and_overflow_values() {
+        for request in [
+            r#"{"run_id":"r","command":["true"],"timeout_ms":-1}"#,
+            r#"{"run_id":"r","command":["true"],"timeout_ms":18446744073709551616}"#,
+            r#"{"run_id":"r","command":["true"],"limits":{"pids_max":-1}}"#,
+        ] {
+            assert!(serde_json::from_str::<AgentRunRequest>(request).is_err());
+        }
+    }
+
+    #[test]
+    fn result_policy_default_matches_deserialized_default() {
+        let direct = ResultPolicy::default();
+        let deserialized: ResultPolicy = serde_json::from_value(json!({})).unwrap();
+
+        assert_eq!(direct.collect_paths, deserialized.collect_paths);
+        assert_eq!(direct.result_file, deserialized.result_file);
     }
 }

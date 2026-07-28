@@ -95,4 +95,41 @@ mod tests {
         let uri: http::Uri = "HTTP://Example.COM:80/a?b=c".parse().unwrap();
         assert_eq!(normalize_uri(&uri).unwrap(), "http://example.com/a?b=c");
     }
+
+    #[test]
+    fn rejects_empty_oversized_and_invalid_patterns() {
+        assert!(EndpointMatcher::new("").is_err());
+        assert!(EndpointMatcher::new("regex:").is_err());
+        assert!(EndpointMatcher::new("regex:[").is_err());
+        assert!(EndpointMatcher::new(&"x".repeat(2049)).is_err());
+        assert!(EndpointMatcher::new(&"x".repeat(2048)).is_ok());
+    }
+
+    #[test]
+    fn normalize_handles_root_non_default_ports_and_ipv6() {
+        let cases = [
+            ("https://Example.COM", "https://example.com/"),
+            (
+                "https://Example.COM:8443/Path?Q=Value",
+                "https://example.com:8443/Path?Q=Value",
+            ),
+            ("https://Example.COM:443/a", "https://example.com/a"),
+            ("http://[::1]:8080/a", "http://[::1]:8080/a"),
+            ("https://[2001:DB8::1]:443/", "https://[2001:db8::1]/"),
+        ];
+
+        for (input, expected) in cases {
+            let uri: http::Uri = input.parse().unwrap();
+            assert_eq!(normalize_uri(&uri).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn normalize_rejects_relative_and_unsupported_targets() {
+        let relative: http::Uri = "/relative/path".parse().unwrap();
+        assert!(normalize_uri(&relative).is_err());
+
+        let unsupported: http::Uri = "ftp://example.com/file".parse().unwrap();
+        assert!(normalize_uri(&unsupported).is_err());
+    }
 }

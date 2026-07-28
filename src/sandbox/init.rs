@@ -3,8 +3,8 @@ use anyhow::{Context, Result};
 
 #[cfg(target_os = "linux")]
 pub fn prepare_and_drop(config: &crate::sandbox::SandboxLaunchConfig) -> Result<()> {
-    unsafe {
-        libc::setpgid(0, 0);
+    if unsafe { libc::setpgid(0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("create child process group");
     }
     crate::sandbox::namespaces::unshare_sandbox_namespaces()
         .context("unshare sandbox namespaces")?;

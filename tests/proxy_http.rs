@@ -1,25 +1,35 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use agentic_sandbox::proxy::{HeaderRuleSource, ProxyConfig, ProxyHandle, headers};
 use agentic_sandbox::types::HeaderOverrideRule;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[tokio::test]
 async fn proxy_injects_headers_and_expires_token() {
+    tokio::time::timeout(TEST_TIMEOUT, proxy_injects_headers_and_expires_token_case())
+        .await
+        .expect("proxy integration test timed out");
+}
+
+async fn proxy_injects_headers_and_expires_token_case() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
         let (mut socket, _) = upstream.accept().await.unwrap();
         let request = read_headers(&mut socket).await;
         socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close, X-Remove-Me\r\nX-Remove-Me: secret\r\n\r\nok",
+            )
             .await
             .unwrap();
         request
     });
 
-    let proxy_addr = free_addr().await;
     let endpoint = format!("http://{}/*", upstream_addr);
     let global_rules = headers::resolve_rules(
         &[HeaderOverrideRule {
@@ -33,12 +43,13 @@ async fn proxy_injects_headers_and_expires_token() {
     )
     .unwrap();
     let proxy = ProxyHandle::start(ProxyConfig {
-        listen_addr: proxy_addr,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
         global_rules,
         mitm: None,
     })
     .await
     .unwrap();
+    let proxy_addr = proxy.listen_addr();
     let registration = proxy
         .register_run(
             "run-1",
@@ -67,11 +78,15 @@ async fn proxy_injects_headers_and_expires_token() {
         .await
         .unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(
+        !response.to_ascii_lowercase().contains("x-remove-me"),
+        "{response}"
+    );
     let upstream_request = upstream_task.await.unwrap();
     let upstream_request_lower = upstream_request.to_ascii_lowercase();
     assert!(upstream_request_lower.contains("authorization: bearer run\r\n"));
     assert!(upstream_request_lower.contains("x-run-header: run-value\r\n"));
-    assert!(!upstream_request.contains("Proxy-Authorization"));
+    assert!(!upstream_request_lower.contains("proxy-authorization"));
 
     drop(registration);
     let expired_response = send_proxy_request(proxy_addr, upstream_addr, &proxy_auth)
@@ -82,6 +97,15 @@ async fn proxy_injects_headers_and_expires_token() {
 
 #[tokio::test]
 async fn proxy_routes_matched_http_request_through_upstream_proxy() {
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        proxy_routes_matched_http_request_through_upstream_proxy_case(),
+    )
+    .await
+    .expect("upstream proxy integration test timed out");
+}
+
+async fn proxy_routes_matched_http_request_through_upstream_proxy_case() {
     let upstream_proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_proxy_addr = upstream_proxy.local_addr().unwrap();
     let upstream_proxy_task = tokio::spawn(async move {
@@ -94,7 +118,6 @@ async fn proxy_routes_matched_http_request_through_upstream_proxy() {
         request
     });
 
-    let proxy_addr = free_addr().await;
     let target_addr = free_addr().await;
     let endpoint = format!("http://{}/*", target_addr);
     let global_rules = headers::resolve_rules(
@@ -109,12 +132,13 @@ async fn proxy_routes_matched_http_request_through_upstream_proxy() {
     )
     .unwrap();
     let proxy = ProxyHandle::start(ProxyConfig {
-        listen_addr: proxy_addr,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
         global_rules,
         mitm: None,
     })
     .await
     .unwrap();
+    let proxy_addr = proxy.listen_addr();
     let registration = proxy.register_run("run-1", "slot-1", &[]).unwrap();
     let proxy_auth = proxy_auth_from_env(&registration.env());
 
@@ -126,10 +150,10 @@ async fn proxy_routes_matched_http_request_through_upstream_proxy() {
     let request_lower = upstream_proxy_request.to_ascii_lowercase();
     assert!(request_lower.starts_with(&format!("get http://{target_addr}/api/test http/1.1")));
     assert!(request_lower.contains("x-global: global\r\n"));
-    assert!(!upstream_proxy_request.contains("Proxy-Authorization"));
+    assert!(!request_lower.contains("proxy-authorization"));
 }
 
-async fn free_addr() -> SocketAddr {
+async fn free_addr() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     listener.local_addr().unwrap()
 }

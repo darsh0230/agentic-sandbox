@@ -316,4 +316,133 @@ mod tests {
         let allocator = SlotAllocator::new("/tmp/workspaces".into(), 3).unwrap();
         assert_eq!(allocator.max_waiting, 30);
     }
+
+    #[test]
+    fn planned_slots_validate_boundaries_and_assign_stable_identities() {
+        for count in [0, 4097, u16::MAX] {
+            let error =
+                SlotAllocator::planned_slots("/srv/workspaces".as_ref(), count).unwrap_err();
+            assert_eq!(error.to_string(), "slot count must be between 1 and 4096");
+        }
+
+        let one = SlotAllocator::planned_slots("/srv/workspaces".as_ref(), 1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].id, "slot-0001");
+        assert_eq!(one[0].uid, 10_001);
+        assert_eq!(one[0].gid, 10_001);
+        assert_eq!(
+            one[0].workspace_path,
+            std::path::Path::new("/srv/workspaces/slot-0001")
+        );
+
+        let maximum = SlotAllocator::planned_slots("/srv/workspaces".as_ref(), 4096).unwrap();
+        assert_eq!(maximum.len(), 4096);
+        let last = maximum.last().unwrap();
+        assert_eq!(last.id, "slot-4096");
+        assert_eq!(last.uid, 14_096);
+        assert_eq!(last.gid, 14_096);
+        assert_eq!(
+            last.workspace_path,
+            std::path::Path::new("/srv/workspaces/slot-4096")
+        );
+    }
+
+    #[test]
+    fn multiple_slots_are_allocated_in_order_and_returned_independently() {
+        let allocator =
+            Arc::new(SlotAllocator::with_max_waiting("/tmp/workspaces".into(), 3, 0).unwrap());
+        let first = ready(allocator.begin_allocate().unwrap());
+        let second = ready(allocator.begin_allocate().unwrap());
+        let third = ready(allocator.begin_allocate().unwrap());
+
+        assert_eq!(first.slot().id, "slot-0001");
+        assert_eq!(second.slot().id, "slot-0002");
+        assert_eq!(third.slot().id, "slot-0003");
+        assert_eq!(allocator.counts(), (0, 0));
+
+        drop(second);
+        let reused = ready(allocator.begin_allocate().unwrap());
+        assert_eq!(reused.slot().id, "slot-0002");
+
+        drop(first);
+        drop(third);
+        drop(reused);
+        assert_eq!(allocator.counts(), (3, 0));
+    }
+
+    #[test]
+    fn zero_waiting_capacity_still_allows_immediate_allocations() {
+        let allocator = allocator(0);
+        let active = ready(allocator.begin_allocate().unwrap());
+        assert_eq!(active.slot().id, "slot-0001");
+
+        let error = match allocator.begin_allocate() {
+            Ok(_) => panic!("a request should not be queued when the limit is zero"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "sandbox wait queue is full (0 waiting; limit 0)"
+        );
+
+        drop(active);
+        assert_eq!(allocator.counts(), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn canceling_a_middle_waiter_preserves_fifo_order_and_queue_capacity() {
+        let allocator = allocator(3);
+        let active = ready(allocator.begin_allocate().unwrap());
+        let first = waiting(allocator.begin_allocate().unwrap());
+        let middle = waiting(allocator.begin_allocate().unwrap());
+        let third = waiting(allocator.begin_allocate().unwrap());
+
+        drop(middle);
+        assert_eq!(allocator.counts(), (0, 2));
+        let replacement = waiting(allocator.begin_allocate().unwrap());
+        assert_eq!(replacement.status().position, 3);
+
+        drop(active);
+        let first_lease = first.wait().await.unwrap();
+        drop(first_lease);
+        let third_lease = third.wait().await.unwrap();
+        drop(third_lease);
+        let replacement_lease = replacement.wait().await.unwrap();
+        drop(replacement_lease);
+        assert_eq!(allocator.counts(), (1, 0));
+    }
+
+    #[test]
+    fn exhausted_waiter_identifier_space_does_not_enqueue_a_partial_waiter() {
+        let allocator = allocator(1);
+        let _active = ready(allocator.begin_allocate().unwrap());
+        allocator.lock_state().next_waiter_id = u64::MAX;
+
+        let error = match allocator.begin_allocate() {
+            Ok(_) => panic!("identifier exhaustion should fail allocation"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "sandbox wait queue identifier space exhausted"
+        );
+        assert_eq!(allocator.counts(), (0, 0));
+    }
+
+    #[test]
+    fn allocator_recovers_after_its_bookkeeping_mutex_is_poisoned() {
+        let allocator = allocator(0);
+        let poisoner = Arc::clone(&allocator);
+        let result = std::thread::spawn(move || {
+            let _guard = poisoner.state.lock().unwrap();
+            panic!("poison allocator bookkeeping lock");
+        })
+        .join();
+        assert!(result.is_err());
+
+        let lease = ready(allocator.begin_allocate().unwrap());
+        assert_eq!(lease.slot().id, "slot-0001");
+        drop(lease);
+        assert_eq!(allocator.counts(), (1, 0));
+    }
 }

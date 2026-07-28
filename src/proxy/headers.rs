@@ -192,6 +192,20 @@ mod tests {
         }
     }
 
+    fn proxy_rule(
+        endpoint: &str,
+        http_proxy: Option<&str>,
+        https_proxy: Option<&str>,
+    ) -> HeaderOverrideRule {
+        HeaderOverrideRule {
+            endpoint: endpoint.into(),
+            override_header_key: None,
+            override_header_value: None,
+            http_proxy: http_proxy.map(str::to_string),
+            https_proxy: https_proxy.map(str::to_string),
+        }
+    }
+
     #[test]
     fn rejects_hop_by_hop_and_host_overrides() {
         assert!(resolve_rules(&[rule("Connection", "x")], HeaderRuleSource::Global).is_err());
@@ -268,5 +282,155 @@ mod tests {
         )
         .unwrap();
         assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn removes_standard_and_connection_nominated_hop_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            http::header::CONNECTION,
+            "keep-alive, X-Remove".parse().unwrap(),
+        );
+        headers.append(http::header::CONNECTION, " x-another ".parse().unwrap());
+        headers.insert("keep-alive", "timeout=5".parse().unwrap());
+        headers.insert("proxy-authorization", "secret".parse().unwrap());
+        headers.insert("x-remove", "one".parse().unwrap());
+        headers.insert("x-another", "two".parse().unwrap());
+        headers.insert("x-keep", "safe".parse().unwrap());
+
+        remove_hop_by_hop(&mut headers);
+
+        assert!(!headers.contains_key(http::header::CONNECTION));
+        assert!(!headers.contains_key("keep-alive"));
+        assert!(!headers.contains_key("proxy-authorization"));
+        assert!(!headers.contains_key("x-remove"));
+        assert!(!headers.contains_key("x-another"));
+        assert_eq!(headers.get("x-keep").unwrap(), "safe");
+    }
+
+    #[test]
+    fn rejects_all_disallowed_overrides_case_insensitively() {
+        for name in HOP_BY_HOP_HEADERS {
+            let mixed_case = name.to_ascii_uppercase();
+            assert!(
+                resolve_rules(&[rule(&mixed_case, "x")], HeaderRuleSource::Global).is_err(),
+                "{mixed_case} should be rejected"
+            );
+        }
+        assert!(resolve_rules(&[rule("hOsT", "x")], HeaderRuleSource::Global).is_err());
+    }
+
+    #[test]
+    fn enforces_global_and_per_run_rule_limits() {
+        let noop = HeaderOverrideRule {
+            endpoint: "http://example.com/*".into(),
+            override_header_key: None,
+            override_header_value: None,
+            http_proxy: None,
+            https_proxy: None,
+        };
+
+        assert!(
+            resolve_rules(
+                &vec![noop.clone(); MAX_GLOBAL_RULES],
+                HeaderRuleSource::Global
+            )
+            .is_ok()
+        );
+        assert!(
+            resolve_rules(
+                &vec![noop.clone(); MAX_GLOBAL_RULES + 1],
+                HeaderRuleSource::Global
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_rules(
+                &vec![noop.clone(); MAX_PER_RUN_RULES],
+                HeaderRuleSource::Run { run_id: "r".into() }
+            )
+            .is_ok()
+        );
+        assert!(
+            resolve_rules(
+                &vec![noop; MAX_PER_RUN_RULES + 1],
+                HeaderRuleSource::Run { run_id: "r".into() }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_upstream_proxy_urls() {
+        for proxy in [
+            "",
+            "proxy.example.com:8080",
+            "socks5://proxy.example.com:1080",
+            "http:/missing-authority",
+            "http://proxy.example.com/\nX-Injected: yes",
+        ] {
+            assert!(
+                resolve_rules(
+                    &[proxy_rule("http://example.com/*", Some(proxy), None)],
+                    HeaderRuleSource::Global,
+                )
+                .is_err(),
+                "{proxy:?} should be rejected"
+            );
+        }
+
+        assert!(
+            resolve_rules(
+                &[proxy_rule(
+                    "https://example.com/*",
+                    None,
+                    Some("https://proxy.example.com:8443"),
+                )],
+                HeaderRuleSource::Global,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn last_matching_proxy_for_the_requested_scheme_wins() {
+        let rules = resolve_rules(
+            &[
+                proxy_rule(
+                    "https://example.com/*",
+                    Some("http://first.example:80"),
+                    Some("http://first.example:80"),
+                ),
+                proxy_rule(
+                    "https://example.com/api/*",
+                    None,
+                    Some("http://second.example:80"),
+                ),
+                proxy_rule(
+                    "https://other.example/*",
+                    None,
+                    Some("http://other.example:80"),
+                ),
+            ],
+            HeaderRuleSource::Global,
+        )
+        .unwrap();
+
+        assert_eq!(
+            matching_upstream_proxy("https://example.com/api/items", "https", &rules).as_deref(),
+            Some("http://second.example:80")
+        );
+        assert_eq!(
+            matching_upstream_proxy("https://example.com/api/items", "http", &rules).as_deref(),
+            Some("http://first.example:80")
+        );
+        assert_eq!(
+            matching_upstream_proxy("https://example.com/miss", "https", &rules).as_deref(),
+            Some("http://first.example:80")
+        );
+        assert_eq!(
+            matching_upstream_proxy("https://unmatched.example/", "https", &rules),
+            None
+        );
     }
 }

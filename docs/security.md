@@ -73,8 +73,8 @@ Both Linux modes:
 - set `PR_SET_NO_NEW_PRIVS`;
 - install a seccomp filter that denies mount/namespace, tracing, kernel-management,
   inbound-listener, and several other high-risk syscalls;
-- run the child in a new process group so timeout and disconnect cleanup can signal
-  the group.
+- run the child in a new process group, then deny `setsid` and `setpgid`, so
+  timeout, disconnect, and normal-exit cleanup can signal the whole group.
 
 Known limitations:
 
@@ -83,8 +83,9 @@ Known limitations:
   syscalls remain available.
 - `close_unneeded_fds` is currently a no-op that relies on standard close-on-exec
   behavior.
-- Process-group killing does not have the containment guarantees of a cgroup; a
-  child that successfully escapes the group may survive cleanup.
+- Process-group killing still does not have the containment and accounting
+  guarantees of a cgroup; keep container-level PID limits and monitoring in
+  place.
 - The child can fork and create outbound sockets.
 
 ## Resource limits
@@ -96,11 +97,13 @@ The implemented limits are:
 
 - wall-clock timeout;
 - bounded stdout and stderr tails in the final result, each capped at 8 MiB;
+- a 2 MiB request limit on both control APIs;
+- at most 256 collected paths, 16 MiB per collected file or structured result,
+  and 64 MiB of collected files in total;
 - bounded slot concurrency and wait queue.
 
-Streaming output is not a total-output quota, and collected files do not currently
-have a documented aggregate size limit. Apply container-level resource limits and
-storage quotas in deployments.
+Streaming output is not a total-output quota. Apply container-level resource
+limits and storage quotas in deployments.
 
 ## Outbound network and proxy
 
@@ -133,8 +136,7 @@ The HTTP interface is explicitly a development API:
 - traffic is plaintext;
 - there are no scopes or tenant separation;
 - there is no built-in rate limit;
-- request sizing relies on Axum's default body limit rather than an explicit
-  project policy;
+- both HTTP and Unix requests are capped at 2 MiB;
 - authorization grants the ability to execute arbitrary image commands.
 
 Keep it bound to `127.0.0.1`, configure a strong token, and place production access
@@ -144,8 +146,11 @@ control plane, so the bearer token must never be available to a child.
 ## Files and environment
 
 Workspace injection validates relative paths and rejects traversal. Workspace
-reset uses a tombstone rename before creating a fresh slot directory. Result
-collection also validates requested relative paths.
+reset uses a tombstone rename before creating a fresh slot directory, and Linux
+ownership transfer walks held directory descriptors without following symlinks.
+Result collection also validates requested relative paths and uses Linux
+`openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` so a concurrent ancestor
+symlink swap cannot escape the workspace.
 
 The environment starts from a controlled baseline and filters common cloud,
 loader, container-control, and proxy variables. This reduces accidental leakage
@@ -178,6 +183,7 @@ Before positioning the project as a hostile-workload sandbox, prioritize:
 3. an allow-list child seccomp profile;
 4. fail-closed capability handling and explicit FD closing;
 5. hardened API authentication, authorization, and request limits;
-6. Linux integration tests that exercise both isolation modes.
+6. broader adversarial Linux isolation coverage beyond the current Docker E2E
+   smoke, queue, timeout, disconnect, and process-tree cases.
 
 Security-sensitive changes should update this document in the same pull request.

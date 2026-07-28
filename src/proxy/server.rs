@@ -27,9 +27,8 @@ use super::{ProxyHandle, ProxyRunContext, ResolvedHeaderOverrideRule};
 type ProxyBody = BoxBody<Bytes, hyper::Error>;
 type ProxyClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Incoming>;
 
-pub async fn spawn(handle: ProxyHandle) -> Result<()> {
+pub async fn spawn(handle: ProxyHandle, listener: TcpListener) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let listener = TcpListener::bind(handle.listen_addr()).await?;
     let local_addr = listener.local_addr()?;
     if local_addr != handle.listen_addr() {
         bail!("proxy listener bound unexpected address {local_addr}");
@@ -121,7 +120,7 @@ async fn handle_http(
     parts.uri = target_uri;
 
     let method = parts.method.clone();
-    let upstream = if let Some(upstream_proxy) = upstream_proxy.as_deref() {
+    let mut upstream = if let Some(upstream_proxy) = upstream_proxy.as_deref() {
         forward_with_upstream_proxy(Request::from_parts(parts, body), upstream_proxy).await?
     } else {
         client
@@ -129,6 +128,7 @@ async fn handle_http(
             .await?
             .map(|body| body.boxed())
     };
+    headers::remove_hop_by_hop(upstream.headers_mut());
     let status = upstream.status();
     info!(
         run_id = %context.run_id,
@@ -151,13 +151,13 @@ async fn handle_connect(
     client: ProxyClient,
 ) -> Result<Response<ProxyBody>> {
     let context = authenticate(req.headers(), &handle)?;
-    let authority = req
+    let target_authority = req
         .uri()
         .authority()
         .ok_or_else(|| anyhow::anyhow!("CONNECT target must be host:port"))?
         .clone();
-    let target = authority.as_str().to_string();
-    let connect_url = normalized_connect_url(&authority);
+    let target = target_authority.as_str().to_string();
+    let connect_url = normalized_connect_url(&target_authority);
     let matched_global = count_matches(handle.global_rules(), &connect_url);
     let matched_run = count_matches(&context.rules, &connect_url);
     let upstream_proxy =
@@ -175,8 +175,15 @@ async fn handle_connect(
         );
         let global_rules = handle.global_rules().to_vec();
         tokio::spawn(async move {
-            if let Err(err) =
-                mitm_connect(req, authority, context, global_rules, target, client).await
+            if let Err(err) = mitm_connect(
+                req,
+                authority,
+                context,
+                global_rules,
+                target_authority,
+                client,
+            )
+            .await
             {
                 debug!(error = %err, "CONNECT MITM failed");
             }
@@ -222,14 +229,10 @@ async fn mitm_connect(
     authority: Arc<super::mitm::MitmAuthority>,
     context: ProxyRunContext,
     global_rules: Vec<ResolvedHeaderOverrideRule>,
-    target: String,
+    target: http::uri::Authority,
     client: ProxyClient,
 ) -> Result<()> {
-    let host = target
-        .split_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or(target.as_str())
-        .to_ascii_lowercase();
+    let host = target.host().to_ascii_lowercase();
     let leaf = authority.certificate_for_host(&host)?;
     let server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -247,7 +250,7 @@ async fn mitm_connect(
             client.clone(),
             context.clone(),
             global_rules.clone(),
-            host.clone(),
+            target.clone(),
         )
     });
     hyper::server::conn::http1::Builder::new()
@@ -263,10 +266,10 @@ async fn mitm_https_request(
     client: ProxyClient,
     context: ProxyRunContext,
     global_rules: Vec<ResolvedHeaderOverrideRule>,
-    host: String,
+    target: http::uri::Authority,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let started = Instant::now();
-    let result = forward_mitm_https(req, client, context, global_rules, host, started).await;
+    let result = forward_mitm_https(req, client, context, global_rules, target, started).await;
     Ok(match result {
         Ok(response) => response,
         Err(err) => {
@@ -281,7 +284,7 @@ async fn forward_mitm_https(
     client: ProxyClient,
     context: ProxyRunContext,
     global_rules: Vec<ResolvedHeaderOverrideRule>,
-    host: String,
+    target: http::uri::Authority,
     started: Instant,
 ) -> Result<Response<ProxyBody>> {
     let path_and_query = req
@@ -289,8 +292,8 @@ async fn forward_mitm_https(
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/");
-    let normalized_url = format!("https://{host}{path_and_query}");
-    let upstream_uri: Uri = normalized_url.parse()?;
+    let upstream_uri: Uri = format!("https://{target}{path_and_query}").parse()?;
+    let normalized_url = normalize_uri(&upstream_uri)?;
     let (mut parts, body) = req.into_parts();
     headers::remove_hop_by_hop(&mut parts.headers);
     let matched_global =
@@ -299,10 +302,13 @@ async fn forward_mitm_https(
         headers::apply_rules(&mut parts.headers, &normalized_url, context.rules.iter());
     let upstream_proxy =
         selected_upstream_proxy(&normalized_url, "https", &global_rules, &context.rules);
-    parts.headers.insert(header::HOST, host.parse()?);
+    parts.headers.insert(
+        header::HOST,
+        header_value_for_host(&upstream_uri).context("build Host header")?,
+    );
     parts.uri = upstream_uri;
     let method = parts.method.clone();
-    let upstream = if let Some(upstream_proxy) = upstream_proxy.as_deref() {
+    let mut upstream = if let Some(upstream_proxy) = upstream_proxy.as_deref() {
         forward_with_upstream_proxy(Request::from_parts(parts, body), upstream_proxy).await?
     } else {
         client
@@ -310,6 +316,7 @@ async fn forward_mitm_https(
             .await?
             .map(|body| body.boxed())
     };
+    headers::remove_hop_by_hop(upstream.headers_mut());
     let status = upstream.status();
     info!(
         run_id = %context.run_id,
@@ -504,6 +511,11 @@ fn redact_query(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    use crate::types::HeaderOverrideRule;
+
     use super::*;
 
     #[test]
@@ -516,5 +528,104 @@ mod tests {
     fn connect_probe_url_omits_default_https_port() {
         let authority: http::uri::Authority = "Example.COM:443".parse().unwrap();
         assert_eq!(normalized_connect_url(&authority), "https://example.com/");
+    }
+
+    #[test]
+    fn connect_probe_url_preserves_non_default_ports_and_ipv6() {
+        let non_default: http::uri::Authority = "Example.COM:8443".parse().unwrap();
+        assert_eq!(
+            normalized_connect_url(&non_default),
+            "https://example.com:8443/"
+        );
+
+        let ipv6: http::uri::Authority = "[2001:DB8::1]:8443".parse().unwrap();
+        assert_eq!(normalized_connect_url(&ipv6), "https://[2001:db8::1]:8443/");
+    }
+
+    #[test]
+    fn host_header_omits_only_default_ports_and_preserves_ipv6_brackets() {
+        let cases = [
+            ("http://Example.COM:80/a", "example.com"),
+            ("https://Example.COM:443/a", "example.com"),
+            ("http://Example.COM:8080/a", "example.com:8080"),
+            ("https://[::1]:8443/a", "[::1]:8443"),
+            ("https://[::1]/a", "[::1]"),
+        ];
+
+        for (uri, expected) in cases {
+            let uri: Uri = uri.parse().unwrap();
+            assert_eq!(header_value_for_host(&uri).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn run_upstream_proxy_takes_precedence_over_global_proxy() {
+        fn proxy_rule(proxy: &str) -> HeaderOverrideRule {
+            HeaderOverrideRule {
+                endpoint: "https://example.com/*".into(),
+                override_header_key: None,
+                override_header_value: None,
+                http_proxy: None,
+                https_proxy: Some(proxy.into()),
+            }
+        }
+
+        let global = headers::resolve_rules(
+            &[proxy_rule("http://global.example:8080")],
+            super::super::HeaderRuleSource::Global,
+        )
+        .unwrap();
+        let run = headers::resolve_rules(
+            &[
+                proxy_rule("http://run-first.example:8080"),
+                proxy_rule("http://run-last.example:8080"),
+            ],
+            super::super::HeaderRuleSource::Run { run_id: "r".into() },
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected_upstream_proxy("https://example.com/a", "https", &global, &run).as_deref(),
+            Some("http://run-last.example:8080")
+        );
+        assert_eq!(
+            selected_upstream_proxy("https://example.com/a", "https", &global, &[]).as_deref(),
+            Some("http://global.example:8080")
+        );
+    }
+
+    #[test]
+    fn proxy_authentication_accepts_only_live_run_credentials() {
+        let handle = ProxyHandle {
+            listen_addr: "127.0.0.1:18080".parse().unwrap(),
+            global_rules: Arc::new(Vec::new()),
+            contexts: Arc::new(RwLock::new(HashMap::new())),
+            mitm: None,
+        };
+        let registration = handle.register_run("run-1", "slot-1", &[]).unwrap();
+
+        let mut headers = HeaderMap::new();
+        let encoded = BASE64.encode(format!("run:{}", registration.token));
+        headers.insert(
+            header::PROXY_AUTHORIZATION,
+            format!("Basic {encoded}").parse().unwrap(),
+        );
+        let context = authenticate(&headers, &handle).unwrap();
+        assert_eq!(context.run_id, "run-1");
+
+        let mut invalid = HeaderMap::new();
+        for value in [
+            "Bearer token".to_string(),
+            "Basic !!!".to_string(),
+            format!("Basic {}", BASE64.encode("other:user")),
+            format!("Basic {}", BASE64.encode("run:unknown")),
+        ] {
+            invalid.insert(header::PROXY_AUTHORIZATION, value.parse().unwrap());
+            assert!(authenticate(&invalid, &handle).is_err(), "{value}");
+        }
+        assert!(authenticate(&HeaderMap::new(), &handle).is_err());
+
+        drop(registration);
+        assert!(authenticate(&headers, &handle).is_err());
     }
 }

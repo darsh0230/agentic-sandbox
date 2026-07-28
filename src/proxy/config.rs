@@ -108,6 +108,19 @@ fn validate_permissions(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn listen_addr() -> SocketAddr {
+        "127.0.0.1:18080".parse().unwrap()
+    }
+
+    fn write_secure(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     #[test]
     fn resolves_env_forms_and_literals() {
         unsafe {
@@ -155,5 +168,92 @@ mod tests {
             https_proxy: None,
         }];
         assert!(resolve_env_values(&mut rules).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_env_references_without_lookup() {
+        for value in ["env:", "${}", "${BAD=NAME}", "env:BAD\0NAME"] {
+            let mut rules = vec![HeaderOverrideRule {
+                endpoint: "http://a/*".into(),
+                override_header_key: Some("X-A".into()),
+                override_header_value: Some(value.into()),
+                http_proxy: None,
+                https_proxy: None,
+            }];
+            assert!(
+                resolve_env_values(&mut rules).is_err(),
+                "{value:?} should be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_missing_config_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.json");
+
+        let err = load_global_config(Some(path.clone()), listen_addr())
+            .await
+            .err()
+            .expect("missing explicit config should fail");
+
+        assert!(
+            err.to_string()
+                .contains(&format!("proxy config does not exist: {}", path.display()))
+        );
+    }
+
+    #[tokio::test]
+    async fn loads_secure_config_and_defaults_missing_rule_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty_path = dir.path().join("empty.json");
+        write_secure(&empty_path, "{}");
+        let empty = load_global_config(Some(empty_path), listen_addr())
+            .await
+            .unwrap();
+        assert_eq!(empty.listen_addr, listen_addr());
+        assert!(empty.global_rules.is_empty());
+
+        let populated_path = dir.path().join("populated.json");
+        write_secure(
+            &populated_path,
+            r#"{"global_inject_headers":[{"endpoint":"http://example.com/*","override_header_key":"X-Test","override_header_value":"value"}]}"#,
+        );
+        let populated = load_global_config(Some(populated_path), listen_addr())
+            .await
+            .unwrap();
+        assert_eq!(populated.global_rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_config_reports_parse_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        write_secure(&path, "{not json");
+
+        let err = load_global_config(Some(path.clone()), listen_addr())
+            .await
+            .err()
+            .expect("malformed config should fail");
+
+        assert!(format!("{err:#}").contains(&format!("parse proxy config: {}", path.display())));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_group_or_world_readable_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("insecure.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = load_global_config(Some(path), listen_addr())
+            .await
+            .err()
+            .expect("insecure config should fail");
+
+        assert!(format!("{err:#}").contains("mode must not allow group or world access"));
     }
 }

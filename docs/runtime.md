@@ -7,22 +7,31 @@ tests, but they do not execute the Linux isolation setup.
 
 ## Docker Compose
 
-The repository's Compose configuration starts privileged isolation and the
-loopback-only development UI:
+The Compose configuration exposes separate profiles so user mode does not inherit
+privileged-only container capabilities. Start exactly one profile:
 
 ```bash
-docker compose up --build
+# Lower container privileges; weaker sandbox isolation
+docker compose --profile user up --build agentic-sandbox-user
+
+# Mount, IPC, and UTS namespace isolation; requires SYS_ADMIN
+docker compose --profile privileged up --build agentic-sandbox-privileged
 ```
 
 Open <http://127.0.0.1:8080> and use `change-me-dev-token`. Override the token
 before any shared deployment:
 
 ```bash
-AGENTIC_SANDBOX_HTTP_TOKEN='replace-with-a-secret' docker compose up --build
+AGENTIC_SANDBOX_HTTP_TOKEN='replace-with-a-secret' \
+  docker compose --profile user up --build agentic-sandbox-user
 ```
 
 The checked-in Compose file uses `change-me-dev-token` only as a fallback and
-passes through `AGENTIC_SANDBOX_HTTP_TOKEN` when it is set in the shell.
+passes through `AGENTIC_SANDBOX_HTTP_TOKEN`, `AGENTIC_SANDBOX_RUST_LOG`, and
+`AGENTIC_SANDBOX_HTTP_PORT` when they are set in the shell. Both profiles share
+the state volume and host port, so do not start them simultaneously. User mode
+omits `SYS_ADMIN` and the unconfined container seccomp override; privileged mode
+enables both for namespace and mount setup.
 
 ## Direct Docker: privileged mode
 

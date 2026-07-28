@@ -1,16 +1,55 @@
 name: agentic-sandbox
 
+x-agentic-sandbox-environment: &agentic-sandbox-environment
+  RUST_LOG: ${AGENTIC_SANDBOX_RUST_LOG:-info}
+  AGENTIC_SANDBOX_ROOT: /var/lib/agentic-sandbox
+  AGENTIC_SANDBOX_HTTP_TOKEN: ${AGENTIC_SANDBOX_HTTP_TOKEN:-change-me-dev-token}
+
+x-agentic-sandbox-common: &agentic-sandbox-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: agentic-sandbox:dev
+  networks:
+    - agentic-sandbox-net
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /run:rw,nosuid,nodev,size=64m
+    - /tmp:rw,nosuid,nodev,size=256m
+  ports:
+    - 127.0.0.1:${AGENTIC_SANDBOX_HTTP_PORT:-8080}:8080
+  volumes:
+    - agentic-sandbox-state:/var/lib/agentic-sandbox
+  command:
+    - /usr/local/bin/agentic-sandbox
+    - serve
+    - --http
+    - 0.0.0.0:8080
+
 services:
-  agentic-sandbox:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: agentic-sandbox:dev
-    container_name: agentic-sandbox
-    networks:
-      - agentic-sandbox-net
-    cap_drop:
-      - ALL
+  agentic-sandbox-user:
+    <<: *agentic-sandbox-common
+    profiles:
+      - user
+    container_name: agentic-sandbox-user
+    cap_add:
+      - SETPCAP
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - KILL
+    environment:
+      <<: *agentic-sandbox-environment
+      AGENTIC_SANDBOX_ISOLATION: user
+
+  agentic-sandbox-privileged:
+    <<: *agentic-sandbox-common
+    profiles:
+      - privileged
+    container_name: agentic-sandbox-privileged
     cap_add:
       - SYS_ADMIN
       - SETPCAP
@@ -22,22 +61,9 @@ services:
       - KILL
     security_opt:
       - seccomp=unconfined
-    tmpfs:
-      - /run:rw,nosuid,nodev,size=64m
-      - /tmp:rw,nosuid,nodev,size=256m
-    ports:
-      - 127.0.0.1:8080:8080
-    volumes:
-      - agentic-sandbox-state:/var/lib/agentic-sandbox
     environment:
-      RUST_LOG: info
-      AGENTIC_SANDBOX_ROOT: /var/lib/agentic-sandbox
-      AGENTIC_SANDBOX_HTTP_TOKEN: ${AGENTIC_SANDBOX_HTTP_TOKEN:-change-me-dev-token}
-    command:
-      - /usr/local/bin/agentic-sandbox
-      - serve
-      - --http
-      - 0.0.0.0:8080
+      <<: *agentic-sandbox-environment
+      AGENTIC_SANDBOX_ISOLATION: privileged
 
 networks:
   agentic-sandbox-net:

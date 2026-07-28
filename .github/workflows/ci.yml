@@ -34,7 +34,9 @@ jobs:
       - name: Run Rust test suite
         run: cargo test --locked --all-targets
       - name: Validate Compose configuration
-        run: docker compose config --quiet
+        run: |
+          docker compose --profile user config --quiet
+          docker compose --profile privileged config --quiet
 
   docker-e2e:
     name: Docker E2E

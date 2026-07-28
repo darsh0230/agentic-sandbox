@@ -30,23 +30,33 @@ Requirements:
 - Docker with Compose
 - A Linux container host for the isolation features
 
-Start the development configuration:
+Start exactly one isolation profile.
+
+User mode runs the control plane without `SYS_ADMIN`:
 
 ```bash
-docker compose up --build
+docker compose --profile user up --build agentic-sandbox-user
+```
+
+Privileged mode enables mount, IPC, and UTS namespace isolation:
+
+```bash
+docker compose --profile privileged up --build agentic-sandbox-privileged
 ```
 
 Open <http://127.0.0.1:8080> and use the development token
 `change-me-dev-token`.
 
 The Compose file is intended for local evaluation. Change the token before sharing
-the service, keep the HTTP listener bound to loopback, and do not treat the browser
-API as a hardened production control plane.
+the service, keep the HTTP listener bound to loopback, do not start both profiles
+at once because they share a port and state volume, and do not treat the browser API
+as a hardened production control plane.
 
 To stop the service:
 
 ```bash
-docker compose down
+docker compose --profile user down
+# or: docker compose --profile privileged down
 ```
 
 ## Minimal API example

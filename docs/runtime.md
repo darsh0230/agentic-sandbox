@@ -12,10 +12,19 @@ privileged-only container capabilities. Start exactly one profile:
 
 ```bash
 # Lower container privileges; weaker sandbox isolation
-docker compose --profile user up --build agentic-sandbox-user
+docker compose --profile user up agentic-sandbox-user
 
 # Mount, IPC, and UTS namespace isolation; requires SYS_ADMIN
-docker compose --profile privileged up --build agentic-sandbox-privileged
+docker compose --profile privileged up agentic-sandbox-privileged
+```
+
+Compose uses `ghcr.io/darsh0230/agentic-sandbox:v0.1.0` by default. Override the
+image with `AGENTIC_SANDBOX_IMAGE`. If the image is unavailable, Compose falls
+back to the checked-in build definition. To force a build of the current
+checkout:
+
+```bash
+docker compose --profile user up --build agentic-sandbox-user
 ```
 
 Open <http://127.0.0.1:8080> and use `change-me-dev-token`. Override the token
@@ -23,7 +32,7 @@ before any shared deployment:
 
 ```bash
 AGENTIC_SANDBOX_HTTP_TOKEN='replace-with-a-secret' \
-  docker compose --profile user up --build agentic-sandbox-user
+  docker compose --profile user up agentic-sandbox-user
 ```
 
 The checked-in Compose file uses `change-me-dev-token` only as a fallback and
@@ -36,7 +45,6 @@ privileged mode enables them for namespace and mount setup.
 ## Direct Docker: privileged mode
 
 ```bash
-docker build -t agentic-sandbox:dev .
 docker network create agentic-sandbox-net
 docker volume create agentic-sandbox-state
 
@@ -59,7 +67,7 @@ docker run --rm -it \
   -e AGENTIC_SANDBOX_HTTP_TOKEN=replace-with-a-secret \
   -p 127.0.0.1:8080:8080 \
   -v agentic-sandbox-state:/var/lib/agentic-sandbox \
-  agentic-sandbox:dev \
+  ghcr.io/darsh0230/agentic-sandbox:v0.1.0 \
   agentic-sandbox serve --isolation privileged --http 0.0.0.0:8080
 ```
 
@@ -89,7 +97,7 @@ docker run --rm -it \
   -e AGENTIC_SANDBOX_HTTP_TOKEN=replace-with-a-secret \
   -p 127.0.0.1:8080:8080 \
   -v agentic-sandbox-state:/var/lib/agentic-sandbox \
-  agentic-sandbox:dev \
+  ghcr.io/darsh0230/agentic-sandbox:v0.1.0 \
   agentic-sandbox serve --http 0.0.0.0:8080
 ```
 
@@ -135,6 +143,33 @@ The current Dockerfile does not pin their versions. Pin external tool versions a
 base-image digests before producing reproducible or security-sensitive releases.
 Agentic Sandbox executes the request's argv and does not require either tool; a
 plain shell command is sufficient for smoke testing.
+
+Non-interactive agent commands currently use these forms:
+
+```bash
+opencode run --auto "Fix the failing tests"
+pi -p "Fix the failing tests"
+```
+
+Both tools require a configured model provider. The
+[agent examples](../examples/README.md) show how a trusted local client can pass a
+provider credential in a run request without committing it to disk.
+
+## Published images
+
+The `Publish container image` workflow runs for tags matching `v*.*.*`. A tag
+such as `v0.1.0` publishes:
+
+- `ghcr.io/darsh0230/agentic-sandbox:v0.1.0`;
+- `ghcr.io/darsh0230/agentic-sandbox:0.1.0`;
+- `ghcr.io/darsh0230/agentic-sandbox:0.1`;
+- `ghcr.io/darsh0230/agentic-sandbox:latest` for non-prerelease tags; and
+- an immutable commit-SHA tag.
+
+After the image succeeds, the workflow creates a GitHub release with generated
+release notes unless that tag already has a release. The current workflow
+publishes `linux/amd64` only and attaches BuildKit provenance and an SBOM.
+Multi-architecture publishing remains a roadmap item.
 
 ## Logging
 

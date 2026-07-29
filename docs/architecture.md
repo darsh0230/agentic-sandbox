@@ -5,6 +5,26 @@ runs inside one Linux container. It multiplexes work over a fixed set of slots,
 creates a clean workspace for each run, starts the requested command with one of
 two isolation modes, streams events, collects selected results, and then cleans up.
 
+```mermaid
+flowchart TB
+    Client["CLI, browser, or API client"] --> API["Unix socket or development HTTP API"]
+    API --> Queue["Bounded FIFO allocator"]
+    Queue --> SlotA["Reusable slot 1"]
+    Queue --> SlotB["Reusable slot 2"]
+    Queue --> SlotN["Reusable slot N"]
+    SlotA --> Launcher["Isolation launcher"]
+    SlotB --> Launcher
+    SlotN --> Launcher
+    Launcher --> Agent["OpenCode, Pi, or shell command"]
+    Agent --> Stream["stdout, stderr, lifecycle events"]
+    Agent --> Files["Declared results and artifacts"]
+    Stream --> API
+    Files --> Collector["Secure result collector"]
+    Collector --> API
+    Collector --> Cleanup["Workspace cleanup"]
+    Cleanup --> Queue
+```
+
 ## Components
 
 | Component | Responsibility |
@@ -120,4 +140,3 @@ caches. Request fields cannot override:
 
 This is a deny-list intended to prevent common accidental leaks, not a complete
 secret-discovery boundary.
-

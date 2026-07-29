@@ -37,6 +37,8 @@ jobs:
         run: |
           docker compose --profile user config --quiet
           docker compose --profile privileged config --quiet
+      - name: Validate example shell scripts
+        run: find examples -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
 
   docker-e2e:
     name: Docker E2E

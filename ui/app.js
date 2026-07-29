@@ -8,7 +8,7 @@ const state = {
 const maxUploadBytes = 24 * 1024 * 1024;
 
 const defaults = {
-  command: "pi --workspace /home/agent --input /home/agent/input/task.md",
+  command: "bash -lc 'pi -p \"$(cat input/task.md)\"'",
   task: "Complete the requested task. Write structured final output to /home/agent/result.json and any artifacts under /home/agent/output.",
 };
 
@@ -53,9 +53,17 @@ function setHealth(kind, text, detail) {
   $("healthDetail").textContent = detail;
 }
 
-function buildRequest(injectedFiles = []) {
+function buildRequest(injectedFiles = [], includeSecrets = false) {
   const collectPaths = $("collectPaths").value.split("\n").map((line) => line.trim()).filter(Boolean);
   const resultFile = $("resultFile").value.trim();
+  const agentKeyName = $("agentKeyName").value.trim();
+  const agentKeyValue = $("agentKeyValue").value;
+  if ((agentKeyName && !agentKeyValue) || (!agentKeyName && agentKeyValue)) {
+    throw new Error("Provider credential variable and value must be supplied together");
+  }
+  if (agentKeyName && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(agentKeyName)) {
+    throw new Error("Provider credential variable is not a valid environment name");
+  }
   return {
     run_id: $("runId").value.trim(),
     command: shellWords($("command").value),
@@ -65,7 +73,7 @@ function buildRequest(injectedFiles = []) {
       mode: 420,
     }, ...injectedFiles],
     injected_readonly_dirs: [],
-    env: [],
+    env: agentKeyName ? [[agentKeyName, includeSecrets ? agentKeyValue : "<redacted>"]] : [],
     timeout_ms: Number($("timeoutMs").value || 300000),
     kill_on_disconnect: true,
     limits: {
@@ -110,7 +118,7 @@ async function runAgent(event) {
         "Content-Type": "application/json",
         ...authHeaders(),
       },
-      body: JSON.stringify(buildRequest(uploadedFiles)),
+      body: JSON.stringify(buildRequest(uploadedFiles, true)),
     });
     if (!response.ok) throw new Error(await response.text());
     await readNdjson(response.body);

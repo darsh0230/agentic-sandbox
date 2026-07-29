@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">single-container isolation console</p>
           <h1 id="title">Agentic Sandbox Control</h1>
-          <p class="lede">Launch a Pi agent into a private workspace, stream its output, and collect artifacts without exposing a browser-reachable control socket to sandboxes.</p>
+          <p class="lede">Launch OpenCode, Pi, or a shell-based agent into a private workspace, stream its output, and collect declared artifacts.</p>
         </div>
         <div class="status-card" aria-live="polite">
           <span class="status-light" id="statusLight"></span>
@@ -38,6 +38,17 @@
 
           <div class="split">
             <label>
+              Provider credential variable
+              <input id="agentKeyName" autocomplete="off" spellcheck="false" placeholder="ANTHROPIC_API_KEY" />
+            </label>
+            <label>
+              Provider credential value
+              <input id="agentKeyValue" type="password" autocomplete="off" spellcheck="false" placeholder="Not stored by this page" />
+            </label>
+          </div>
+
+          <div class="split">
+            <label>
               Run ID
               <input id="runId" required />
             </label>
@@ -48,7 +59,7 @@
           </div>
 
           <label>
-            Command
+            Agent command
             <textarea id="command" rows="4" spellcheck="false"></textarea>
           </label>
 

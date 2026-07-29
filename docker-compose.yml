@@ -9,7 +9,7 @@ x-agentic-sandbox-common: &agentic-sandbox-common
   build:
     context: .
     dockerfile: Dockerfile
-  image: agentic-sandbox:dev
+  image: ${AGENTIC_SANDBOX_IMAGE:-ghcr.io/darsh0230/agentic-sandbox:v0.1.0}
   networks:
     - agentic-sandbox-net
   cap_drop:

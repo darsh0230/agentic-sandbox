@@ -15,7 +15,7 @@ Authorization: Bearer <token>
 
 | Method | Path | Response |
 | --- | --- | --- |
-| `GET` | `/api/health` | `{"status":"ok"}` |
+| `GET` | `/api/health` | HTTP 200 `{"status":"ok"}`; HTTP 503 while shutting down |
 | `POST` | `/api/run` | `application/x-ndjson` stream |
 | `GET` | `/` | Embedded development UI |
 
@@ -189,11 +189,24 @@ Run streams can emit:
 - `agent_event`
 - `result_file_found`
 - `exited`
+- `shutting_down`
 - `timed_out`
 - `failed`
 
 The current supervisor emits stdout/stderr and lifecycle events; `agent_event` is
 part of the wire type but is not currently produced by the launcher.
+
+`shutting_down` is emitted after the service successfully forwards SIGINT or
+SIGTERM to the run's process group. Its numeric `signal` field preserves the
+forwarded Unix signal, for example:
+
+```json
+{"type":"shutting_down","signal":15}
+```
+
+The subsequent `exited` event describes how the direct child actually exited. A
+child that catches SIGTERM and exits normally can therefore report
+`{"exit_code":0,"signal":null}`.
 
 Both APIs send `{"type":"heartbeat"}` every 15 seconds. These keep idle queued or
 quiet-running streams observable and also help detect disconnected clients.

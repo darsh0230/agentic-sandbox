@@ -21,6 +21,7 @@ use tracing::info;
 
 use crate::api::events::RUN_STREAM_HEARTBEAT_INTERVAL;
 use crate::master::Master;
+use crate::shutdown::{wait_for_force, wait_for_shutdown};
 use crate::types::{AgentRunEvent, AgentRunRequest};
 
 const INDEX_HTML: &str = include_str!("../../ui/index.html");
@@ -81,6 +82,9 @@ impl Drop for RunBodyStream {
 }
 
 pub async fn serve_http(config: HttpConfig, master: Master) -> Result<()> {
+    let shutdown = master.shutdown();
+    let mut graceful_rx = shutdown.subscribe();
+    let mut force_rx = shutdown.subscribe();
     let state = AppState {
         master,
         token: config.token.map(Arc::from),
@@ -89,7 +93,22 @@ pub async fn serve_http(config: HttpConfig, master: Master) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     info!(addr = %config.addr, "development HTTP UI listening");
-    axum::serve(listener, app).await?;
+    let server = async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                wait_for_shutdown(&mut graceful_rx).await;
+            })
+            .await
+    };
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result?,
+        _ = wait_for_force(&mut force_rx) => {
+            // Dropping the server future closes any connection that did not
+            // finish within the process-wide grace period.
+        }
+    }
+    shutdown.wait_for_idle().await;
     Ok(())
 }
 
@@ -132,11 +151,28 @@ async fn js() -> Response {
         .into_response()
 }
 
-async fn health() -> Response {
-    Json(HealthResponse { status: "ok" }).into_response()
+async fn health(State(state): State<AppState>) -> Response {
+    if state.master.is_accepting_runs() {
+        Json(HealthResponse { status: "ok" }).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthResponse {
+                status: "shutting_down",
+            }),
+        )
+            .into_response()
+    }
 }
 
 async fn run_agent(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if !state.master.is_accepting_runs() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "agentic sandbox is shutting down and is not accepting new runs",
+        )
+            .into_response();
+    }
     if !has_json_content_type(&headers) {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -558,6 +594,56 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[tokio::test]
+    async fn draining_service_reports_unready_and_rejects_new_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let master = Master::new(
+            root.path().to_path_buf(),
+            1,
+            IsolationMode::Privileged,
+            None,
+        )
+        .await
+        .unwrap();
+        let shutdown = master.shutdown();
+        let app = router(AppState {
+            master,
+            token: Some(std::sync::Arc::from("secret")),
+        });
+        shutdown.begin(crate::shutdown::ShutdownSignal::Terminate);
+
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            health.into_body().collect().await.unwrap().to_bytes(),
+            r#"{"status":"shutting_down"}"#
+        );
+
+        let run = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/run")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

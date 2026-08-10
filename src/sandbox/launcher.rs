@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::master::supervisor::ExitStatus;
 use crate::sandbox::{OutputChunk, OutputStream, SandboxLaunchConfig};
+use crate::shutdown::ShutdownSignal;
 
 pub struct SandboxLauncher;
 
@@ -87,25 +88,60 @@ impl SandboxChild {
     }
 
     pub async fn kill(&mut self) -> Result<()> {
-        self.signal_kill();
+        let process_group_result = self.signal_kill();
         self.child.kill().await.ok();
-        Ok(())
+        process_group_result
     }
 
-    fn signal_kill(&mut self) {
+    pub fn send_signal(&mut self, signal: ShutdownSignal) -> Result<()> {
+        self.signal_process_group(signal.as_raw())
+    }
+
+    #[cfg(unix)]
+    fn signal_process_group(&self, signal: i32) -> Result<()> {
+        if self.pid <= 0 {
+            bail!("sandbox child has an invalid process group id");
+        }
+        if unsafe { libc::kill(-self.pid, signal) } == 0 {
+            return Ok(());
+        }
+
+        let group_error = std::io::Error::last_os_error();
+        if group_error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(group_error.into());
+        }
+
+        // Non-Linux development hosts and a child that exits during pre-exec
+        // can briefly lack the expected process group. Preserve direct-child
+        // delivery without treating an already-exited child as an error.
+        if unsafe { libc::kill(self.pid, signal) } == 0 {
+            return Ok(());
+        }
+        let child_error = std::io::Error::last_os_error();
+        if child_error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(child_error.into())
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn signal_process_group(&self, _signal: i32) -> Result<()> {
+        bail!("graceful sandbox signaling requires a Unix host")
+    }
+
+    fn signal_kill(&mut self) -> Result<()> {
         if self.process_tree_signaled {
-            return;
+            return Ok(());
         }
         self.process_tree_signaled = true;
-        #[cfg(unix)]
-        if self.pid > 0 {
-            // The direct child may already have been reaped, at which point
-            // tokio::process::Child::id returns None. Its original process
-            // group can still contain live descendants, so retain the spawn
-            // PID and always target that group exactly once.
-            unsafe { libc::kill(-self.pid, libc::SIGKILL) };
-        }
+        // The direct child may already have been reaped, at which point
+        // tokio::process::Child::id returns None. Its original process group
+        // can still contain live descendants, so retain the spawn PID and
+        // always target that group exactly once.
+        let result = self.signal_process_group(libc::SIGKILL);
         self.child.start_kill().ok();
+        result
     }
 }
 
@@ -113,7 +149,7 @@ impl Drop for SandboxChild {
     fn drop(&mut self) {
         // A canceled or panicking execution task must not leave a process using
         // a slot that is about to be returned to the allocator.
-        self.signal_kill();
+        self.signal_kill().ok();
     }
 }
 
@@ -214,6 +250,15 @@ fn configure_platform(
     _setup_error_path: std::path::PathBuf,
 ) -> Result<()> {
     command.current_dir(&config.slot.workspace_path);
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     Ok(())
 }
 
@@ -237,6 +282,40 @@ mod tests {
             command,
             env: vec![],
             injected_readonly_dirs: vec![],
+        }
+    }
+
+    #[cfg(unix)]
+    fn stopped_process_group(script: &str) -> SandboxChild {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        let pid = child.id().unwrap() as i32;
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) },
+            pid
+        );
+        assert!(libc::WIFSTOPPED(status));
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        let (_, output_rx) = mpsc::channel(1);
+        SandboxChild {
+            child,
+            output_rx,
+            pid,
+            process_tree_signaled: false,
         }
     }
 
@@ -283,5 +362,38 @@ mod tests {
         let signaled = exit_status_from(std::process::ExitStatus::from_raw(libc::SIGKILL));
         assert_eq!(signaled.code, None);
         assert_eq!(signaled.signal, Some(libc::SIGKILL));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn forwards_the_requested_signal_to_the_child_process_group() {
+        let mut child =
+            stopped_process_group("trap 'exit 71' INT; kill -STOP $$; while :; do sleep 1; done");
+        child.send_signal(ShutdownSignal::Interrupt).unwrap();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+            .await
+            .expect("child did not handle SIGINT")
+            .unwrap();
+        child.process_tree_signaled = true;
+        assert_eq!(exit.code, Some(71));
+        assert_eq!(exit.signal, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn force_kill_escalates_after_a_ignored_graceful_signal() {
+        let mut child =
+            stopped_process_group("trap '' TERM; kill -STOP $$; while :; do sleep 1; done");
+        child.send_signal(ShutdownSignal::Terminate).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(child.try_wait().await.unwrap().is_none());
+
+        child.kill().await.unwrap();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+            .await
+            .expect("SIGKILL escalation did not reap the child")
+            .unwrap();
+        assert_eq!(exit.code, None);
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
     }
 }

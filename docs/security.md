@@ -74,7 +74,16 @@ Both Linux modes:
 - install a seccomp filter that denies mount/namespace, tracing, kernel-management,
   inbound-listener, and several other high-risk syscalls;
 - run the child in a new process group, then deny `setsid` and `setpgid`, so
-  timeout, disconnect, and normal-exit cleanup can signal the whole group.
+  timeout, disconnect, normal-exit cleanup, and service shutdown can signal the
+  whole group.
+
+The trusted control plane requires `CAP_KILL` to signal a slot after that slot
+switches to its dedicated UID. This applies to both isolation modes. The supplied
+Compose profiles include the capability; Kubernetes or other deployments that
+drop all capabilities must explicitly add it. On SIGINT or SIGTERM, the control
+plane forwards the exact signal to active slot groups. Slot commands may run
+cleanup handlers until the configured shutdown deadline, after which SIGKILL is
+used.
 
 Known limitations:
 
@@ -170,6 +179,8 @@ explicit allow-list.
 - Replace the unconfined seccomp and AppArmor settings with reviewed
   control-plane profiles.
 - Drop every container capability that the selected isolation mode does not need.
+- Keep `CAP_KILL`; graceful forwarding and forced process-tree cleanup require it
+  after slot UID/GID changes.
 - Apply container-level CPU, memory, PID, and filesystem limits.
 - Restrict egress at the container or orchestrator network layer.
 - Run only one trust domain per Agentic Sandbox instance.
@@ -185,6 +196,6 @@ Before positioning the project as a hostile-workload sandbox, prioritize:
 4. fail-closed capability handling and explicit FD closing;
 5. hardened API authentication, authorization, and request limits;
 6. broader adversarial Linux isolation coverage beyond the current Docker E2E
-   smoke, queue, timeout, disconnect, and process-tree cases.
+   smoke, queue, timeout, disconnect, shutdown-signal, and process-tree cases.
 
 Security-sensitive changes should update this document in the same pull request.

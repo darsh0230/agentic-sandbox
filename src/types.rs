@@ -131,6 +131,9 @@ pub enum AgentRunEvent {
         exit_code: Option<i32>,
         signal: Option<i32>,
     },
+    ShuttingDown {
+        signal: i32,
+    },
     TimedOut,
     Failed {
         message: String,
@@ -441,6 +444,10 @@ mod tests {
                     signal: Some(9),
                 },
                 json!({"type":"exited","exit_code":null,"signal":9}),
+            ),
+            (
+                AgentRunEvent::ShuttingDown { signal: 15 },
+                json!({"type":"shutting_down","signal":15}),
             ),
             (AgentRunEvent::TimedOut, json!({"type":"timed_out"})),
             (

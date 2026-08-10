@@ -98,6 +98,7 @@ docker compose --profile user down
 - Streaming stdout, stderr, lifecycle events, and 15-second heartbeats
 - Input-file injection and explicit result/artifact collection
 - Per-run timeouts, disconnect cancellation, and cleanup policies
+- Graceful SIGINT/SIGTERM forwarding to active slot process groups
 - Run-scoped outbound proxy credentials, header overrides, upstream proxy
   routing, and optional HTTPS interception
 
@@ -175,8 +176,8 @@ find examples -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
 ```
 
 The Docker E2E suite validates HTTP authentication, artifacts, timeouts,
-queueing, heartbeats, disconnect cancellation, process-tree cleanup, and slot
-reuse:
+queueing, heartbeats, disconnect cancellation, graceful shutdown forwarding,
+process-tree cleanup, and slot reuse:
 
 ```bash
 cargo test --locked --test docker_e2e -- --ignored --test-threads=1

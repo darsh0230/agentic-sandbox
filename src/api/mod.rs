@@ -8,11 +8,13 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::api::events::RUN_STREAM_HEARTBEAT_INTERVAL;
 use crate::master::Master;
+use crate::shutdown::{wait_for_force, wait_for_shutdown};
 use crate::types::{AgentRunEvent, AgentRunRequest};
 
 const MAX_API_REQUEST_BYTES: usize = 2 * 1024 * 1024;
@@ -47,16 +49,50 @@ pub async fn serve_unix(socket: PathBuf, master: Master) -> Result<()> {
 
     let listener = UnixListener::bind(&socket)?;
     info!(socket = %socket.display(), "master API listening");
+    let shutdown = master.shutdown();
+    let mut shutdown_rx = shutdown.subscribe();
+    let mut force_rx = shutdown.subscribe();
     let master = Arc::new(master);
+    let mut clients = JoinSet::new();
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        let master = Arc::clone(&master);
-        tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, master).await {
-                error!(?err, "client handling failed");
+        tokio::select! {
+            biased;
+            _ = wait_for_shutdown(&mut shutdown_rx) => break,
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let master = Arc::clone(&master);
+                clients.spawn(async move { handle_client(stream, master).await });
             }
-        });
+            joined = clients.join_next(), if !clients.is_empty() => {
+                report_client_result(joined);
+            }
+        }
+    }
+    drop(listener);
+    info!(socket = %socket.display(), "master API draining");
+
+    while !clients.is_empty() {
+        tokio::select! {
+            joined = clients.join_next() => report_client_result(joined),
+            _ = wait_for_force(&mut force_rx) => {
+                clients.abort_all();
+                while let Some(joined) = clients.join_next().await {
+                    report_client_result(Some(joined));
+                }
+            }
+        }
+    }
+    shutdown.wait_for_idle().await;
+    Ok(())
+}
+
+fn report_client_result(joined: Option<std::result::Result<Result<()>, tokio::task::JoinError>>) {
+    match joined {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(err))) => error!(?err, "client handling failed"),
+        Some(Err(err)) if err.is_cancelled() => {}
+        Some(Err(err)) => warn!(?err, "client task failed"),
     }
 }
 
@@ -100,7 +136,12 @@ async fn handle_client(stream: UnixStream, master: Arc<Master>) -> Result<()> {
 
     match request {
         ApiRequest::Health => {
-            write_json_line(&mut writer, &ApiResponse::Health { status: "ok" }).await?
+            let status = if master.is_accepting_runs() {
+                "ok"
+            } else {
+                "shutting_down"
+            };
+            write_json_line(&mut writer, &ApiResponse::Health { status }).await?
         }
         ApiRequest::Run { request } => {
             let (tx, rx) = tokio::sync::mpsc::channel::<AgentRunEvent>(64);

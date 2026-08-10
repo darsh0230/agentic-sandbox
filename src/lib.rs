@@ -5,4 +5,5 @@ pub mod master;
 pub mod policy;
 pub mod proxy;
 pub mod sandbox;
+pub mod shutdown;
 pub mod types;

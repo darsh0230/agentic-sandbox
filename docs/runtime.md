@@ -114,6 +114,7 @@ but it is a substantially weaker isolation boundary. See
 | `--root <PATH>` | `AGENTIC_SANDBOX_ROOT` | `/var/lib/agentic-sandbox` |
 | `--slots <COUNT>` | — | `8` |
 | `--max-waiting <COUNT>` | `AGENTIC_SANDBOX_MAX_WAITING` | `10 × slots` |
+| `--shutdown-grace-ms <MILLISECONDS>` | `AGENTIC_SANDBOX_SHUTDOWN_GRACE_MS` | `25000` |
 | `--socket <PATH>` | — | `/var/lib/agentic-sandbox/state/master.sock` |
 | `--config <PATH>` | — | none; currently accepted and logged but not loaded |
 | `--http <ADDR>` | `AGENTIC_SANDBOX_HTTP_ADDR` | disabled |
@@ -127,6 +128,77 @@ but it is a substantially weaker isolation boundary. See
 | `--proxy-ca-key <PATH>` | `AGENTIC_SANDBOX_PROXY_CA_KEY` | `state/proxy-ca-key.pem` |
 
 Use `--max-waiting 0` to reject requests immediately when all slots are occupied.
+
+The shutdown grace applies to both `serve` and `run-json`. The first SIGINT or
+SIGTERM stops run admission and forwards the same signal to every active slot
+process group. A second shutdown signal or expiry of the grace period sends
+SIGKILL to remaining groups. Set the value below the outer container or service
+manager's termination deadline so result collection and workspace cleanup retain
+time to finish.
+
+## Kubernetes termination
+
+The supplied image declares `STOPSIGNAL SIGTERM` and keeps Tini as PID 1. During
+normal Pod termination, Tini forwards SIGTERM to `agentic-sandbox`; the service
+then drains its listeners and forwards SIGTERM to every active slot process
+group. No `preStop` hook is required for signal propagation.
+
+Set the Pod grace period longer than the internal grace. With the default 25
+second service grace, a value such as 40 seconds leaves time for result
+collection, workspace cleanup, and container exit:
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 40
+  containers:
+    - name: agentic-sandbox
+      image: ghcr.io/darsh0230/agentic-sandbox:v0.1.0
+      args:
+        - /usr/local/bin/agentic-sandbox
+        - serve
+        - --http
+        - 0.0.0.0:8080
+        - --shutdown-grace-ms
+        - "25000"
+```
+
+Use `args`, as above, to retain the image's Tini entrypoint. If a deployment
+overrides `command`, it must provide an equivalent init and signal-forwarding
+chain.
+
+For user isolation, the control plane starts as root, changes each slot to its
+dedicated UID/GID, and needs these capabilities. `KILL` is required for both
+graceful forwarding and forced cleanup:
+
+```yaml
+securityContext:
+  capabilities:
+    drop: ["ALL"]
+    add:
+      - SETPCAP
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - KILL
+env:
+  - name: AGENTIC_SANDBOX_ISOLATION
+    value: user
+```
+
+Privileged isolation additionally requires `SYS_ADMIN` and container security
+profiles that allow its namespace and mount setup. The simplest Kubernetes
+configuration is `securityContext.privileged: true`; a hardened deployment
+should instead grant only the documented capabilities and reviewed seccomp and
+AppArmor permissions, including `KILL`.
+
+When draining begins, `/api/health` returns HTTP 503 with
+`{"status":"shutting_down"}`, new runs are rejected, and queued or pre-launch
+runs are canceled. Existing run streams remain open until their slots exit or
+the grace period expires. Kubernetes also marks terminating Pod endpoints not
+ready, but the application state protects traffic arriving over existing or
+non-Service connections.
 
 The proxy config defaults to
 `/var/lib/agentic-sandbox/state/proxy-headers.json`. A missing default file is

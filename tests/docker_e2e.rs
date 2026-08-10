@@ -100,6 +100,9 @@ async fn run_scenarios(harness: &DockerHarness) -> Result<()> {
         "final health check returned {}",
         response.status()
     );
+    graceful_shutdown_scenario(harness)
+        .await
+        .context("SIGTERM forwarding scenario")?;
     Ok(())
 }
 
@@ -528,6 +531,93 @@ async fn privileged_isolation_scenario(harness: &DockerHarness) -> Result<()> {
             "privileged stdout omitted {expected:?}: {stdout:?}"
         );
     }
+    graceful_shutdown_scenario(harness)
+        .await
+        .context("privileged SIGTERM forwarding scenario")?;
+    Ok(())
+}
+
+async fn graceful_shutdown_scenario(harness: &DockerHarness) -> Result<()> {
+    let run_id = harness.run_id("graceful-shutdown");
+    let command = r#"trap 'printf handled-SIGTERM; exit 0' TERM
+trap 'printf handled-SIGINT; exit 71' INT
+printf 'handler-ready\n'
+while :; do :; done"#;
+    let mut stream = harness
+        .open_run(json!({
+            "run_id": run_id,
+            "command": ["sh", "-c", command],
+            "timeout_ms": 60_000,
+            "result_policy": {"collect_paths": [], "result_file": null}
+        }))
+        .await?;
+    let mut lines = Vec::new();
+    collect_until(
+        &mut stream,
+        &mut lines,
+        Duration::from_secs(8),
+        "slot signal handler readiness marker",
+        |value| {
+            is_event(value, "stdout")
+                && json_byte_array(&value["event"]["data"]).is_ok_and(|bytes| {
+                    bytes
+                        .windows(b"handler-ready".len())
+                        .any(|window| window == b"handler-ready")
+                })
+        },
+    )
+    .await?;
+
+    let mut queued_stream = harness
+        .open_run(basic_sleep_request(
+            &harness.run_id("shutdown-queued"),
+            10.0,
+            None,
+        ))
+        .await?;
+    let mut queued_lines = Vec::new();
+    collect_until(
+        &mut queued_stream,
+        &mut queued_lines,
+        Duration::from_secs(8),
+        "queued shutdown request",
+        |value| is_event(value, "waiting_for_slot"),
+    )
+    .await?;
+
+    harness.resources.signal("TERM")?;
+    let (transcript, queued_transcript) = tokio::try_join!(
+        drain_to_terminal(stream, lines, Duration::from_secs(12)),
+        drain_to_terminal(queued_stream, queued_lines, Duration::from_secs(12)),
+    )?;
+    let shutting_down = transcript
+        .first_event("shutting_down")
+        .context("run omitted shutting_down event")?;
+    ensure!(
+        shutting_down.value["event"]["signal"].as_i64() == Some(libc::SIGTERM.into()),
+        "shutdown event did not preserve SIGTERM: {}",
+        shutting_down.value
+    );
+    let stdout = transcript.event_bytes("stdout")?;
+    ensure!(
+        String::from_utf8_lossy(&stdout).contains("handled-SIGTERM"),
+        "slot did not execute its SIGTERM handler: {:?}",
+        String::from_utf8_lossy(&stdout)
+    );
+    let result = transcript.result()?;
+    ensure!(
+        result["exit_code"] == 0 && result["signal"].is_null(),
+        "SIGTERM handler did not exit cleanly: {result}"
+    );
+    ensure!(
+        !queued_transcript.has_event("started")
+            && queued_transcript
+                .error_message()?
+                .contains("shutting down after SIGTERM"),
+        "queued run was not canceled during shutdown: {:?}",
+        queued_transcript.values()
+    );
+    harness.resources.wait_for_exit()?;
     Ok(())
 }
 
@@ -1312,6 +1402,8 @@ impl DockerResources {
             .arg("0.0.0.0:8080")
             .arg("--http-token")
             .arg(token)
+            .arg("--shutdown-grace-ms")
+            .arg("5000")
             .arg("--isolation")
             .arg(isolation.as_str());
         checked_command(command, DOCKER_COMMAND_TIMEOUT, "docker run")?;
@@ -1355,6 +1447,28 @@ impl DockerResources {
             }
             Err(error) => format!("unable to read container logs: {error:#}"),
         }
+    }
+
+    fn signal(&self, signal: &str) -> Result<()> {
+        let mut command = Command::new("docker");
+        command
+            .arg("kill")
+            .arg("--signal")
+            .arg(signal)
+            .arg(&self.container);
+        checked_command(command, DOCKER_COMMAND_TIMEOUT, "docker kill")?;
+        Ok(())
+    }
+
+    fn wait_for_exit(&self) -> Result<()> {
+        let mut command = Command::new("docker");
+        command.arg("wait").arg(&self.container);
+        let container_status = checked_command(command, DOCKER_COMMAND_TIMEOUT, "docker wait")?;
+        ensure!(
+            container_status == "0",
+            "gracefully stopped container exited with status {container_status}"
+        );
+        Ok(())
     }
 
     fn cleanup(&mut self, strict: bool) -> Result<()> {

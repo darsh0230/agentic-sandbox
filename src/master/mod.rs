@@ -18,6 +18,7 @@ use crate::policy::defaults::clean_env_for_slot;
 use crate::proxy::ProxyHandle;
 use crate::proxy::mitm::{PRIVILEGED_CA_PATH, WORKSPACE_CA_RELATIVE_PATH};
 use crate::sandbox::{IsolationMode, OutputStream, SandboxLaunchConfig, SandboxLauncher, SlotSpec};
+use crate::shutdown::{DEFAULT_SHUTDOWN_GRACE, ShutdownCoordinator, ShutdownPhase, ShutdownSignal};
 use crate::types::{AgentRunEvent, AgentRunRequest, AgentRunResult, CleanupPolicy};
 
 use self::allocator::{SlotAllocation, SlotAllocator};
@@ -39,6 +40,7 @@ pub struct Master {
     isolation_mode: IsolationMode,
     launcher_lock: Arc<Mutex<()>>,
     proxy: Option<ProxyHandle>,
+    shutdown: ShutdownCoordinator,
 }
 
 impl Master {
@@ -60,6 +62,25 @@ impl Master {
         max_waiting: usize,
         isolation_mode: IsolationMode,
         proxy: Option<ProxyHandle>,
+    ) -> Result<Self> {
+        Self::new_with_max_waiting_and_shutdown(
+            root,
+            slot_count,
+            max_waiting,
+            isolation_mode,
+            proxy,
+            ShutdownCoordinator::new(DEFAULT_SHUTDOWN_GRACE),
+        )
+        .await
+    }
+
+    pub async fn new_with_max_waiting_and_shutdown(
+        root: PathBuf,
+        slot_count: u16,
+        max_waiting: usize,
+        isolation_mode: IsolationMode,
+        proxy: Option<ProxyHandle>,
+        shutdown: ShutdownCoordinator,
     ) -> Result<Self> {
         WorkspaceManager::prepare_root(&root, isolation_mode).await?;
         let planned_slots = SlotAllocator::planned_slots(&root.join("workspaces"), slot_count)?;
@@ -85,7 +106,16 @@ impl Master {
             root,
             launcher_lock: Arc::new(Mutex::new(())),
             proxy,
+            shutdown,
         })
+    }
+
+    pub fn shutdown(&self) -> ShutdownCoordinator {
+        self.shutdown.clone()
+    }
+
+    pub fn is_accepting_runs(&self) -> bool {
+        self.shutdown.phase().is_running()
     }
 
     pub async fn run_agent(
@@ -93,6 +123,8 @@ impl Master {
         req: AgentRunRequest,
         events: Option<mpsc::Sender<AgentRunEvent>>,
     ) -> Result<AgentRunResult> {
+        let mut shutdown_rx = self.shutdown.subscribe();
+        let run_permit = self.shutdown.try_start_run()?;
         validate_request(&req, self.isolation_mode)?;
         if self.proxy.is_none() && !req.inject_headers.is_empty() {
             bail!("inject_headers requires proxy support; remove --disable-proxy");
@@ -116,21 +148,54 @@ impl Master {
                     };
 
                     if req.kill_on_disconnect {
-                        tx.send(event)
-                            .await
-                            .context("client disconnected while entering sandbox wait queue")?;
                         tokio::select! {
+                            biased;
+                            changed = shutdown_rx.changed() => {
+                                changed.context("shutdown channel closed")?;
+                                return Err(shutdown_error(*shutdown_rx.borrow_and_update()));
+                            }
+                            result = tx.send(event) => {
+                                result.context("client disconnected while entering sandbox wait queue")?;
+                            }
+                        }
+                        tokio::select! {
+                            biased;
+                            changed = shutdown_rx.changed() => {
+                                changed.context("shutdown channel closed")?;
+                                return Err(shutdown_error(*shutdown_rx.borrow_and_update()));
+                            }
                             lease = waiter.wait() => lease?,
                             _ = tx.closed() => {
                                 bail!("client disconnected while waiting for a sandbox slot");
                             }
                         }
                     } else {
-                        let _ = tx.send(event).await;
-                        waiter.wait().await?
+                        tokio::select! {
+                            biased;
+                            changed = shutdown_rx.changed() => {
+                                changed.context("shutdown channel closed")?;
+                                return Err(shutdown_error(*shutdown_rx.borrow_and_update()));
+                            }
+                            _ = tx.send(event) => {}
+                        }
+                        tokio::select! {
+                            biased;
+                            changed = shutdown_rx.changed() => {
+                                changed.context("shutdown channel closed")?;
+                                return Err(shutdown_error(*shutdown_rx.borrow_and_update()));
+                            }
+                            lease = waiter.wait() => lease?,
+                        }
                     }
                 } else {
-                    waiter.wait().await?
+                    tokio::select! {
+                        biased;
+                        changed = shutdown_rx.changed() => {
+                            changed.context("shutdown channel closed")?;
+                            return Err(shutdown_error(*shutdown_rx.borrow_and_update()));
+                        }
+                        lease = waiter.wait() => lease?,
+                    }
                 };
                 info!(
                     run_id = %req.run_id,
@@ -150,7 +215,10 @@ impl Master {
         let master = self.clone();
         let run_task = tokio::spawn(async move {
             let _slot_lease = slot_lease;
-            master.run_agent_in_slot(req, slot_spec, events).await
+            let _run_permit = run_permit;
+            master
+                .run_agent_in_slot(req, slot_spec, events, shutdown_rx)
+                .await
         });
         run_task.await.context("sandbox execution task failed")?
     }
@@ -160,11 +228,13 @@ impl Master {
         req: AgentRunRequest,
         slot: SlotSpec,
         events: Option<mpsc::Sender<AgentRunEvent>>,
+        mut shutdown_rx: tokio::sync::watch::Receiver<ShutdownPhase>,
     ) -> Result<AgentRunResult> {
         await_while_connected(
             self.workspace.reset_workspace(&slot),
             req.kill_on_disconnect,
             events.as_ref(),
+            &mut shutdown_rx,
         )
         .await?
         .context("reset workspace")?;
@@ -172,6 +242,7 @@ impl Master {
             self.injector.inject(&slot, &req.injected_files),
             req.kill_on_disconnect,
             events.as_ref(),
+            &mut shutdown_rx,
         )
         .await?
         .context("inject files")?;
@@ -189,6 +260,7 @@ impl Master {
                 ),
                 req.kill_on_disconnect,
                 events.as_ref(),
+                &mut shutdown_rx,
             )
             .await?
             .context("inject proxy MITM CA certificate")?;
@@ -197,6 +269,7 @@ impl Master {
             self.workspace.chown_workspace(&slot),
             req.kill_on_disconnect,
             events.as_ref(),
+            &mut shutdown_rx,
         )
         .await?
         .context("chown workspace")?;
@@ -228,21 +301,29 @@ impl Master {
             self.launcher_lock.lock(),
             req.kill_on_disconnect,
             events.as_ref(),
+            &mut shutdown_rx,
         )
         .await?;
+        if !shutdown_rx.borrow().is_running() {
+            return Err(shutdown_error(*shutdown_rx.borrow_and_update()));
+        }
         let mut child = SandboxLauncher::spawn(config).context("spawn sandbox")?;
         drop(_guard);
 
-        if let Some(tx) = &events {
-            let _ = tx
-                .send(AgentRunEvent::Started {
-                    run_id: req.run_id.clone(),
-                    slot_id: slot.id.clone(),
-                    pid: child.pid(),
-                })
-                .await;
-        }
         let reliable_events = ReliableEventForwarder::new(events.as_ref());
+        let started = AgentRunEvent::Started {
+            run_id: req.run_id.clone(),
+            slot_id: slot.id.clone(),
+            pid: child.pid(),
+        };
+        if let Some(tx) = &events {
+            match tx.try_send(started) {
+                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                Err(mpsc::error::TrySendError::Full(started)) => {
+                    reliable_events.send(started);
+                }
+            }
+        }
 
         let stdout_max = req
             .limits
@@ -270,8 +351,46 @@ impl Master {
 
         let mut interval = tokio::time::interval(Duration::from_millis(25));
         let mut output_open = true;
-        let termination = loop {
+        let mut shutdown_signal = None;
+        let termination = 'supervise: loop {
             tokio::select! {
+                biased;
+                changed = shutdown_rx.changed() => {
+                    let phase = if changed.is_err() {
+                        ShutdownPhase::Forced {
+                            signal: shutdown_signal.unwrap_or(ShutdownSignal::Terminate),
+                        }
+                    } else {
+                        *shutdown_rx.borrow_and_update()
+                    };
+                    if let Some(termination) = handle_supervisor_shutdown_phase(
+                        phase,
+                        &mut shutdown_signal,
+                        |signal| {
+                            info!(
+                                run_id = %req.run_id,
+                                slot = %slot.id,
+                                signal = signal.name(),
+                                "forwarding shutdown signal to sandbox process group"
+                            );
+                            child.send_signal(signal).with_context(|| {
+                                format!(
+                                    "forward {} to sandbox process group {}",
+                                    signal.name(),
+                                    child.pid()
+                                )
+                            })?;
+                            Ok(())
+                        },
+                        |signal| {
+                            reliable_events.send(AgentRunEvent::ShuttingDown {
+                                signal: signal.as_raw(),
+                            });
+                        },
+                    )? {
+                        break 'supervise termination;
+                    }
+                }
                 chunk = child.next_output(), if output_open => {
                     match chunk {
                         Some(chunk) => {
@@ -299,11 +418,16 @@ impl Master {
                                 events.as_ref(),
                             ).await;
                         }
-                        break RunTermination::Exited;
+                        break match shutdown_signal {
+                            Some(signal) => RunTermination::ServiceShutdown(signal),
+                            None => RunTermination::Exited,
+                        };
                     }
                 }
-                _ = &mut timeout => break RunTermination::TimedOut,
-                _ = &mut disconnected => break RunTermination::ClientDisconnected,
+                _ = &mut timeout, if shutdown_signal.is_none() => break RunTermination::TimedOut,
+                _ = &mut disconnected, if shutdown_signal.is_none() => {
+                    break RunTermination::ClientDisconnected;
+                }
             }
         };
 
@@ -312,16 +436,44 @@ impl Master {
                 // The direct child may have left background descendants in its
                 // process group. Terminate them before collecting results so
                 // they cannot race artifact reads or the next slot owner.
-                let _ = child.kill().await;
+                if let Err(err) = child.kill().await {
+                    warn!(run_id = %req.run_id, ?err, "failed to clean sandbox process group");
+                }
             }
             RunTermination::TimedOut => {
                 warn!(run_id = %req.run_id, "sandbox timed out; killing process tree");
-                let _ = child.kill().await;
+                if let Err(err) = child.kill().await {
+                    warn!(run_id = %req.run_id, ?err, "failed to kill timed-out sandbox process group");
+                }
                 reliable_events.send(AgentRunEvent::TimedOut);
             }
             RunTermination::ClientDisconnected => {
                 warn!(run_id = %req.run_id, "client disconnected; killing sandbox process tree");
-                let _ = child.kill().await;
+                if let Err(err) = child.kill().await {
+                    warn!(run_id = %req.run_id, ?err, "failed to kill disconnected sandbox process group");
+                }
+            }
+            RunTermination::ServiceShutdown(signal) => {
+                info!(
+                    run_id = %req.run_id,
+                    signal = signal.name(),
+                    "sandbox exited after graceful shutdown signal"
+                );
+                // The direct child has exited. Remove any descendants that did
+                // not honor the process-group signal before releasing the slot.
+                if let Err(err) = child.kill().await {
+                    warn!(run_id = %req.run_id, ?err, "failed to clean gracefully stopped sandbox process group");
+                }
+            }
+            RunTermination::ForcedShutdown(signal) => {
+                warn!(
+                    run_id = %req.run_id,
+                    signal = signal.name(),
+                    "sandbox exceeded shutdown grace period; killing process tree"
+                );
+                if let Err(err) = child.kill().await {
+                    warn!(run_id = %req.run_id, ?err, "failed to force-kill sandbox process group");
+                }
             }
         }
 
@@ -367,6 +519,33 @@ enum RunTermination {
     Exited,
     TimedOut,
     ClientDisconnected,
+    ServiceShutdown(ShutdownSignal),
+    ForcedShutdown(ShutdownSignal),
+}
+
+fn handle_supervisor_shutdown_phase(
+    phase: ShutdownPhase,
+    forwarded_signal: &mut Option<ShutdownSignal>,
+    mut forward_signal: impl FnMut(ShutdownSignal) -> Result<()>,
+    mut emit_shutting_down: impl FnMut(ShutdownSignal),
+) -> Result<Option<RunTermination>> {
+    let signal = match phase {
+        ShutdownPhase::Running => return Ok(None),
+        ShutdownPhase::Graceful { signal, .. } | ShutdownPhase::Forced { signal } => signal,
+    };
+
+    // A watch receiver observes only the latest value. If Graceful changes to
+    // Forced before this supervisor is polled, preserve the required ordering:
+    // forward the original graceful signal and publish its lifecycle event
+    // before allowing the caller to enter forced process-tree cleanup.
+    if forwarded_signal.is_none() {
+        forward_signal(signal)?;
+        *forwarded_signal = Some(signal);
+        emit_shutting_down(signal);
+    }
+
+    Ok(matches!(phase, ShutdownPhase::Forced { .. })
+        .then_some(RunTermination::ForcedShutdown(signal)))
 }
 
 struct ReliableEventForwarder {
@@ -415,14 +594,40 @@ async fn await_while_connected<T>(
     operation: impl std::future::Future<Output = T>,
     kill_on_disconnect: bool,
     events: Option<&mpsc::Sender<AgentRunEvent>>,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<ShutdownPhase>,
 ) -> Result<T> {
+    if !shutdown_rx.borrow().is_running() {
+        return Err(shutdown_error(*shutdown_rx.borrow_and_update()));
+    }
+    tokio::pin!(operation);
     if kill_on_disconnect && let Some(tx) = events {
         tokio::select! {
-            result = operation => Ok(result),
+            biased;
+            changed = shutdown_rx.changed() => {
+                changed.context("shutdown channel closed")?;
+                Err(shutdown_error(*shutdown_rx.borrow_and_update()))
+            }
+            result = &mut operation => Ok(result),
             _ = tx.closed() => bail!("client disconnected before sandbox started"),
         }
     } else {
-        Ok(operation.await)
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                changed.context("shutdown channel closed")?;
+                Err(shutdown_error(*shutdown_rx.borrow_and_update()))
+            }
+            result = &mut operation => Ok(result),
+        }
+    }
+}
+
+fn shutdown_error(phase: ShutdownPhase) -> anyhow::Error {
+    match phase {
+        ShutdownPhase::Graceful { signal, .. } | ShutdownPhase::Forced { signal } => {
+            anyhow::anyhow!("agentic sandbox is shutting down after {}", signal.name())
+        }
+        ShutdownPhase::Running => anyhow::anyhow!("agentic sandbox shutdown channel closed"),
     }
 }
 
@@ -757,6 +962,18 @@ mod tests {
                 None,
                 true,
             ),
+            (
+                CleanupPolicy::PreserveWorkspaceOnFailure,
+                RunTermination::ServiceShutdown(ShutdownSignal::Terminate),
+                Some(0),
+                true,
+            ),
+            (
+                CleanupPolicy::PreserveWorkspaceOnFailure,
+                RunTermination::ForcedShutdown(ShutdownSignal::Terminate),
+                None,
+                true,
+            ),
         ] {
             assert_eq!(
                 should_preserve_workspace(policy, termination, exit_code),
@@ -867,10 +1084,17 @@ mod tests {
     async fn prelaunch_work_is_canceled_when_the_client_disconnects() {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
+        let shutdown = ShutdownCoordinator::new(DEFAULT_SHUTDOWN_GRACE);
+        let mut shutdown_rx = shutdown.subscribe();
 
-        let err = await_while_connected(std::future::pending::<()>(), true, Some(&tx))
-            .await
-            .unwrap_err();
+        let err = await_while_connected(
+            std::future::pending::<()>(),
+            true,
+            Some(&tx),
+            &mut shutdown_rx,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(
             err.to_string(),
@@ -882,8 +1106,10 @@ mod tests {
     async fn prelaunch_work_continues_when_disconnect_killing_is_disabled() {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
+        let shutdown = ShutdownCoordinator::new(DEFAULT_SHUTDOWN_GRACE);
+        let mut shutdown_rx = shutdown.subscribe();
 
-        let value = await_while_connected(async { 42 }, false, Some(&tx))
+        let value = await_while_connected(async { 42 }, false, Some(&tx), &mut shutdown_rx)
             .await
             .unwrap();
 
@@ -892,10 +1118,137 @@ mod tests {
 
     #[tokio::test]
     async fn prelaunch_work_without_an_event_stream_completes() {
-        let value = await_while_connected(async { 42 }, true, None)
+        let shutdown = ShutdownCoordinator::new(DEFAULT_SHUTDOWN_GRACE);
+        let mut shutdown_rx = shutdown.subscribe();
+        let value = await_while_connected(async { 42 }, true, None, &mut shutdown_rx)
             .await
             .unwrap();
         assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn prelaunch_work_is_canceled_when_service_shutdown_begins() {
+        let shutdown = ShutdownCoordinator::new(DEFAULT_SHUTDOWN_GRACE);
+        let mut shutdown_rx = shutdown.subscribe();
+        shutdown.begin(ShutdownSignal::Terminate);
+
+        let err =
+            await_while_connected(std::future::pending::<()>(), false, None, &mut shutdown_rx)
+                .await
+                .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "agentic sandbox is shutting down after SIGTERM"
+        );
+    }
+
+    #[test]
+    fn coalesced_forced_shutdown_forwards_graceful_signal_and_event_before_force() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Effect {
+            SignalForwarded(ShutdownSignal),
+            EventEmitted(ShutdownSignal),
+        }
+
+        let shutdown = ShutdownCoordinator::new(DEFAULT_SHUTDOWN_GRACE);
+        let mut shutdown_rx = shutdown.subscribe();
+        assert!(matches!(
+            shutdown.begin(ShutdownSignal::Interrupt),
+            crate::shutdown::BeginShutdown::Started { .. }
+        ));
+        assert!(shutdown.force());
+
+        // The supervisor has not observed either transition yet, so watch
+        // exposes only the latest Forced state here.
+        let phase = *shutdown_rx.borrow_and_update();
+        assert!(matches!(phase, ShutdownPhase::Forced { .. }));
+
+        let effects = std::cell::RefCell::new(Vec::new());
+        let mut forwarded_signal = None;
+        let termination = handle_supervisor_shutdown_phase(
+            phase,
+            &mut forwarded_signal,
+            |signal| {
+                effects.borrow_mut().push(Effect::SignalForwarded(signal));
+                Ok(())
+            },
+            |signal| {
+                effects.borrow_mut().push(Effect::EventEmitted(signal));
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            effects.into_inner(),
+            vec![
+                Effect::SignalForwarded(ShutdownSignal::Interrupt),
+                Effect::EventEmitted(ShutdownSignal::Interrupt),
+            ]
+        );
+        assert_eq!(forwarded_signal, Some(ShutdownSignal::Interrupt));
+        assert_eq!(
+            termination,
+            Some(RunTermination::ForcedShutdown(ShutdownSignal::Interrupt))
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[tokio::test]
+    async fn service_shutdown_signal_reaches_the_sandbox_process_group() {
+        let root = tempfile::tempdir().unwrap();
+        let shutdown = ShutdownCoordinator::new(Duration::from_secs(2));
+        let master = Master::new_with_max_waiting_and_shutdown(
+            root.path().to_path_buf(),
+            1,
+            1,
+            IsolationMode::User,
+            None,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
+        let mut req = request();
+        req.run_id = "shutdown-signal".into();
+        req.command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "trap 'printf handled-term; exit 0' TERM; printf handler-ready; while :; do :; done"
+                .into(),
+        ];
+        req.timeout_ms = 10_000;
+        req.result_policy.result_file = None;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let run_task = tokio::spawn({
+            let master = master.clone();
+            async move { master.run_agent(req, Some(tx)).await }
+        });
+        let mut started = false;
+        let mut handler_ready = false;
+        while !started || !handler_ready {
+            match rx.recv().await {
+                Some(AgentRunEvent::Started { .. }) => started = true,
+                Some(AgentRunEvent::Stdout { data }) => {
+                    handler_ready |= String::from_utf8_lossy(&data).contains("handler-ready");
+                }
+                Some(_) => {}
+                None => panic!("run ended before the sandbox started"),
+            }
+        }
+        shutdown.begin(ShutdownSignal::Terminate);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), run_task)
+            .await
+            .expect("sandbox did not handle SIGTERM")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.signal, None);
+        assert!(
+            String::from_utf8_lossy(&result.stdout_tail).contains("handled-term"),
+            "slot SIGTERM handler did not produce its marker"
+        );
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]

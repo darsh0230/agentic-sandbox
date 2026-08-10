@@ -17,10 +17,11 @@ the project intends to use [Semantic Versioning](https://semver.org/).
 - Docker Compose profiles and Docker-backed E2E coverage.
 - OpenCode and Pi Coding Agent in the runtime image.
 - Agent-specific examples and GHCR release automation.
+- Graceful SIGINT/SIGTERM draining with exact-signal forwarding to active slot
+  process groups and bounded SIGKILL escalation.
 
 ### Security
 
 - Documented current isolation boundaries and production-hardening gaps.
 
 [Unreleased]: https://github.com/darsh0230/agentic-sandbox/commits/main
-

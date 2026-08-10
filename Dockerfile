@@ -58,5 +58,6 @@ RUN chmod 0755 /dev/shm || true
 ENV RUST_LOG=info
 ENV AGENTIC_SANDBOX_ROOT=/var/lib/agentic-sandbox
 
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/agentic-sandbox-entrypoint"]
 CMD ["/usr/local/bin/agentic-sandbox", "serve"]

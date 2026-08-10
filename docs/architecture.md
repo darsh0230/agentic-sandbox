@@ -56,10 +56,30 @@ control plane; see the [security model](security.md) for the consequences.
    vector supplied by the request.
 8. Stdout and stderr are streamed while bounded tail buffers are retained for the
    final result.
-9. A timeout or client disconnect kills the child process group by default.
-10. Declared files and the optional result JSON file are collected.
-11. The workspace is reset unless its cleanup policy preserves it.
-12. The slot lease is returned to the FIFO allocator.
+9. A timeout or client disconnect kills the child process group by default. A
+   service SIGINT or SIGTERM is forwarded unchanged to every active child
+   process group and is allowed to complete within the service shutdown grace
+   period.
+10. A child still running at the shutdown deadline is sent SIGKILL.
+11. Declared files and the optional result JSON file are collected.
+12. The workspace is reset unless its cleanup policy preserves it.
+13. The slot lease is returned to the FIFO allocator.
+
+## Service shutdown
+
+The trusted control plane owns a shutdown coordinator shared by the APIs,
+allocator admission path, and run supervisors. The first SIGINT or SIGTERM
+atomically stops new run admission, closes API listeners, cancels queued and
+pre-launch work, and forwards that exact signal to every active slot process
+group. Active HTTP and Unix streams remain alive while their runs handle the
+signal and clean up.
+
+Each admitted run holds a permit until result collection and workspace cleanup
+finish. The service waits for all permits before exiting. At the configured
+deadline, or when a second SIGINT/SIGTERM arrives, the coordinator transitions
+to forced shutdown and supervisors send SIGKILL to remaining slot groups. Both
+isolation modes use this same path; mount, IPC, and UTS namespaces do not affect
+signal delivery because PID namespaces remain shared.
 
 ## Slot model
 

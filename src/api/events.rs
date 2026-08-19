@@ -3,6 +3,11 @@ use std::time::Duration;
 
 pub(crate) const RUN_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Bound on the HTTP run handler's wait for queued lifecycle events to drain
+/// before emitting the terminal `result`/`error` line; a stall past this logs a
+/// warning and terminates the stream so the client still gets a complete body.
+pub(crate) const RUN_STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone)]
 pub struct TailBuffer {
     bytes: VecDeque<u8>,

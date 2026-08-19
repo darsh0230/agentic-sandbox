@@ -147,6 +147,8 @@ async fn handle_client(stream: UnixStream, master: Arc<Master>) -> Result<()> {
             let (tx, rx) = tokio::sync::mpsc::channel::<AgentRunEvent>(64);
             let stream_task = tokio::spawn(stream_run_events(writer, rx));
             let result = master.run_agent(*request, Some(tx)).await;
+            // Joining flushes queued lifecycle events (e.g. shutting_down)
+            // before the terminal result/error line.
             let mut writer = stream_task.await??;
             match result {
                 Ok(result) => {

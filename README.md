@@ -3,6 +3,7 @@
 [![CI](https://github.com/darsh0230/agentic-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/darsh0230/agentic-sandbox/actions/workflows/ci.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Experimental](https://img.shields.io/badge/status-experimental-orange.svg)](ROADMAP.md)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/darsh0230/agentic-sandbox)
 
 **A self-hosted Rust runtime for running coding agents in reusable, isolated
 Linux workspaces.** Run OpenCode, Pi, and shell-based agents with streamed

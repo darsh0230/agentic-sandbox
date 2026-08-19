@@ -211,6 +211,14 @@ child that catches SIGTERM and exits normally can therefore report
 Both APIs send `{"type":"heartbeat"}` every 15 seconds. These keep idle queued or
 quiet-running streams observable and also help detect disconnected clients.
 
+After the run's child exits, the server flushes any buffered lifecycle events
+(`shutting_down`, `exited`, `result_file_found`) before writing the terminal
+`result`/`error` line. The HTTP handler bounds this flush at 2 seconds; on the
+rare occasion it is exceeded the server logs a warning and still emits the
+terminal line so the response body is complete rather than truncated. The
+`timeout_ms` request field bounds only the child's execution—event flush and
+result collection always run to completion afterward.
+
 ## Direct JSON command
 
 For local debugging without either API:

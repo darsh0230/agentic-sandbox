@@ -338,8 +338,11 @@ impl Master {
         let mut stdout_tail = TailBuffer::new(stdout_max);
         let mut stderr_tail = TailBuffer::new(stderr_max);
 
-        let timeout = tokio::time::sleep(Duration::from_millis(req.timeout_ms));
-        tokio::pin!(timeout);
+        // Bounds only the child's execution. Once the child exits, event flush,
+        // result collection, and workspace cleanup run to completion (outside
+        // this budget) so a finished run still delivers its terminal result.
+        let execution_deadline = tokio::time::sleep(Duration::from_millis(req.timeout_ms));
+        tokio::pin!(execution_deadline);
         let disconnect_events = req.kill_on_disconnect.then(|| events.clone()).flatten();
         let disconnected = async move {
             match disconnect_events {
@@ -424,7 +427,7 @@ impl Master {
                         };
                     }
                 }
-                _ = &mut timeout, if shutdown_signal.is_none() => break RunTermination::TimedOut,
+                _ = &mut execution_deadline, if shutdown_signal.is_none() => break RunTermination::TimedOut,
                 _ = &mut disconnected, if shutdown_signal.is_none() => {
                     break RunTermination::ClientDisconnected;
                 }
@@ -490,6 +493,9 @@ impl Master {
                 size: file.size,
             });
         }
+        // Drain ShuttingDown/Exited/ResultFileFound into the channel before it
+        // closes, so a fast shutdown cannot truncate the client's event stream.
+        reliable_events.flush().await;
 
         let preserve = should_preserve_workspace(req.cleanup_policy, termination, exit.code);
         if !preserve {
@@ -548,34 +554,49 @@ fn handle_supervisor_shutdown_phase(
         .then_some(RunTermination::ForcedShutdown(signal)))
 }
 
-struct ReliableEventForwarder {
-    tx: Option<mpsc::UnboundedSender<AgentRunEvent>>,
+/// Forwards the finite lifecycle/artifact event set into the (bounded) run
+/// event channel without ever blocking the supervisor on a slow consumer.
+/// When a run has no event channel this is the `Inactive` no-op variant.
+enum ReliableEventForwarder {
+    Inactive,
+    Active {
+        tx: mpsc::UnboundedSender<AgentRunEvent>,
+        task: tokio::task::JoinHandle<()>,
+    },
 }
 
 impl ReliableEventForwarder {
     fn new(output: Option<&mpsc::Sender<AgentRunEvent>>) -> Self {
         let Some(output) = output else {
-            return Self { tx: None };
+            return Self::Inactive;
         };
         let output = output.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            // This queue only carries the finite lifecycle/artifact event set,
-            // never unbounded process output. Forward sequentially to preserve
-            // TimedOut -> Exited -> ResultFileFound ordering without holding a
-            // sandbox slot when a response consumer is temporarily slow.
+        // Never carries unbounded process output; sequential forwarding
+        // preserves TimedOut -> Exited -> ResultFileFound ordering.
+        let task = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 if output.send(event).await.is_err() {
                     break;
                 }
             }
         });
-        Self { tx: Some(tx) }
+        Self::Active { tx, task }
     }
 
     fn send(&self, event: AgentRunEvent) {
-        if let Some(tx) = &self.tx {
+        if let Self::Active { tx, .. } = self {
             let _ = tx.send(event);
+        }
+    }
+
+    /// Close the queue and wait until buffered lifecycle events reach the
+    /// downstream channel, so a run that ends right after shutdown cannot
+    /// close the channel while `ShuttingDown`/`Exited` are still in flight.
+    async fn flush(self) {
+        if let Self::Active { tx, task } = self {
+            drop(tx);
+            let _ = task.await;
         }
     }
 }
@@ -1078,6 +1099,55 @@ mod tests {
             Some(AgentRunEvent::ResultFileFound { .. })
         ));
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn flush_delivers_lifecycle_events_before_the_forwarder_returns() {
+        // A slow consumer must not cause lifecycle events to be lost when the
+        // forwarder is flushed: the queue blocks on a full downstream channel
+        // until the reader makes room, preserving order through shutdown.
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(AgentRunEvent::Stdout {
+            data: b"occupied".to_vec(),
+        })
+        .await
+        .unwrap();
+        let forwarder = ReliableEventForwarder::new(Some(&tx));
+        forwarder.send(AgentRunEvent::ShuttingDown {
+            signal: libc::SIGTERM,
+        });
+        forwarder.send(AgentRunEvent::Exited {
+            exit_code: Some(0),
+            signal: None,
+        });
+
+        // flush() must not return until both lifecycle events are handed to the
+        // (initially full) downstream channel.
+        let flush = tokio::spawn(async move { forwarder.flush().await });
+        tokio::task::yield_now().await;
+        assert!(!flush.is_finished());
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(AgentRunEvent::Stdout { .. })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AgentRunEvent::ShuttingDown {
+                signal
+            }) if signal == libc::SIGTERM
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AgentRunEvent::Exited {
+                exit_code: Some(0),
+                signal: None
+            })
+        ));
+        tokio::time::timeout(Duration::from_secs(1), flush)
+            .await
+            .expect("flush did not complete after the consumer drained the queue")
+            .unwrap();
     }
 
     #[tokio::test]

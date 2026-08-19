@@ -3,3 +3,4 @@
 __pycache__/
 *.py[cod]
 examples/**/output/
+.DS_Store

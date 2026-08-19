@@ -17,9 +17,9 @@ use futures::Stream;
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::api::events::RUN_STREAM_HEARTBEAT_INTERVAL;
+use crate::api::events::{RUN_STREAM_DRAIN_TIMEOUT, RUN_STREAM_HEARTBEAT_INTERVAL};
 use crate::master::Master;
 use crate::shutdown::{wait_for_force, wait_for_shutdown};
 use crate::types::{AgentRunEvent, AgentRunRequest};
@@ -233,15 +233,25 @@ async fn run_agent(State(state): State<AppState>, headers: HeaderMap, body: Byte
     });
 
     let result_tx = line_tx.clone();
+    let run_id = request.run_id.clone();
     tokio::spawn(async move {
         let result = master.run_agent(request, Some(event_tx)).await;
-        // The master can finish after enqueueing its final lifecycle events.
-        // Wait until the forwarding task has drained them so the terminal line
-        // can never overtake `exited` or `result_file_found`.
-        let _ = events_drained_rx.await;
-        // Stop and join the heartbeat producer before adding the terminal
-        // record. This makes `result`/`error` the final NDJSON line even when
-        // the line channel was previously backpressured.
+        // Wait for the forwarding task to drain queued lifecycle events so the
+        // terminal line can never overtake `exited` or `result_file_found`. The
+        // bound keeps a stalled forwarder from leaving the response body open
+        // forever; a timeout here means events were likely dropped, so log it.
+        if tokio::time::timeout(RUN_STREAM_DRAIN_TIMEOUT, events_drained_rx)
+            .await
+            .is_err()
+        {
+            warn!(
+                run_id = %run_id,
+                timeout_ms = RUN_STREAM_DRAIN_TIMEOUT.as_millis() as u64,
+                "run event stream did not drain before the terminal response; \
+                 lifecycle events may have been dropped"
+            );
+        }
+        // Stop the heartbeat producer so `result`/`error` is the final line.
         let _ = done_tx.send(true);
         let _ = heartbeat_task.await;
         match result {
@@ -259,6 +269,7 @@ async fn run_agent(State(state): State<AppState>, headers: HeaderMap, body: Byte
             }
         }
     });
+    // The handler's own sender is unused; the spawned tasks own the rest.
     drop(line_tx);
 
     let stream = RunBodyStream {
@@ -517,6 +528,46 @@ mod tests {
                 .iter()
                 .all(|line| line == "{\"type\":\"heartbeat\"}\n"),
             "only already-enqueued heartbeats may precede the terminal line"
+        );
+    }
+
+    // Host-mode coverage only: `IsolationMode::Privileged` executes directly
+    // on the host off-Linux, but on Linux it requires namespace/mount setup
+    // that bare CI lacks. The equivalent Linux path (shutting_down followed by
+    // a complete terminal result over the containerized socket) is covered by
+    // the `graceful_shutdown_scenario` in tests/docker_e2e.rs.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[tokio::test]
+    async fn run_stream_terminates_with_a_complete_terminal_line() {
+        let (app, _root) = test_router(None).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/run")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"run_id":"stream-end","command":["/bin/sh","-c","exit 0"],"result_policy":{"result_file":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        // Collecting the body to completion requires the stream to terminate;
+        // a truncated body would surface as a collect error above.
+        let last = text.lines().filter(|l| !l.is_empty()).next_back().unwrap();
+        assert!(
+            last.contains(r#""type":"result""#) || last.contains(r#""type":"error""#),
+            "run stream must end with a terminal result/error line, got: {last}"
+        );
+        // The child exited cleanly; the terminal result must not be an error.
+        assert!(
+            last.contains(r#""type":"result""#),
+            "expected result: {last}"
         );
     }
 

@@ -176,6 +176,12 @@ docker compose --profile privileged config --quiet
 find examples -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
 ```
 
+These host-only checks exercise parsing, scheduling, and the APIs, but almost
+none of the advertised containment: the namespace, mount, credential, seccomp,
+and egress boundaries are Linux-only and are validated solely by the Docker E2E
+suite below. Treat a green host run — especially on macOS or Windows — as a
+smoke check, not as evidence that isolation works.
+
 The Docker E2E suite validates HTTP authentication, artifacts, timeouts,
 queueing, heartbeats, disconnect cancellation, graceful shutdown forwarding,
 process-tree cleanup, and slot reuse:

@@ -204,6 +204,13 @@ fn configure_platform(
     config: SandboxLaunchConfig,
     setup_error_path: std::path::PathBuf,
 ) -> Result<()> {
+    // The child's fd-closing hook is currently a no-op stub (see
+    // `sandbox::fds` and the roadmap). Say so here, on the host side: the
+    // `pre_exec` child runs in a fork context where tracing is not safe.
+    tracing::debug!(
+        isolation_mode = %config.isolation_mode,
+        "sandbox launches without closing inherited file descriptors; close_range allowlist is not yet implemented"
+    );
     if config.isolation_mode == crate::sandbox::IsolationMode::User {
         command.current_dir(&config.slot.workspace_path);
     }

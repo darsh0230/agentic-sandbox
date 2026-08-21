@@ -11,7 +11,6 @@ This roadmap is directional, not a delivery commitment.
 - Publish signed, tagged `linux/amd64` images to GHCR.
 - Pin base-image digests and OpenCode/Pi package versions.
 - Add a short, reproducible coding-agent demo and recording.
-- Align the browser upload limit with the HTTP request limit.
 - Expand adversarial tests for filesystem collection, process cleanup, and
   environment filtering.
 - Document release, rollback, and compatibility procedures.
@@ -47,5 +46,6 @@ These are candidates for maintainers to create and label on GitHub:
    override, an upstream HTTP proxy, and HTTPS MITM with explicit warnings.
 4. **Add an image tool-version smoke test.** Verify `opencode --version`,
    `pi --version`, `git --version`, and `rg --version` in the Docker E2E image.
-5. **Improve browser request-size feedback.** Read the server's 2 MiB limit in
-   the UI copy and reject oversized JSON before submission.
+5. **Serve the request-size limit to the browser.** Expose the run request
+   limit (currently 32 MiB) from an API endpoint and use it in the UI copy and
+   pre-flight check, replacing the hardcoded constant in `ui/app.js`.

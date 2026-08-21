@@ -106,7 +106,7 @@ The implemented limits are:
 
 - wall-clock timeout;
 - bounded stdout and stderr tails in the final result, each capped at 8 MiB;
-- a 2 MiB request limit on both control APIs;
+- a 32 MiB request limit on both control APIs;
 - at most 256 collected paths, 16 MiB per collected file or structured result,
   and 64 MiB of collected files in total;
 - bounded slot concurrency and wait queue.
@@ -145,7 +145,7 @@ The HTTP interface is explicitly a development API:
 - traffic is plaintext;
 - there are no scopes or tenant separation;
 - there is no built-in rate limit;
-- both HTTP and Unix requests are capped at 2 MiB;
+- both HTTP and Unix requests are capped at 32 MiB;
 - authorization grants the ability to execute arbitrary image commands.
 
 Keep it bound to `127.0.0.1`, configure a strong token, and place production access

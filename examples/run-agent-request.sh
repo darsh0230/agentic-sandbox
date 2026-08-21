@@ -44,7 +44,7 @@ curl --fail-with-body --silent --show-error --no-buffer \
     elif .type == "event" and .event.type == "waiting_for_slot" then
       "[queued] position \(.event.position)"
     elif .type == "event" and (.event.type == "stdout" or .event.type == "stderr") then
-      (.event.data | implode)
+      (.event.data | if type == "string" then . else implode end)
     elif .type == "event" and .event.type == "result_file_found" then
       "[artifact] \(.event.relative_path) (\(.event.size) bytes)"
     elif .type == "event" and .event.type == "exited" then
@@ -77,7 +77,7 @@ while IFS= read -r artifact; do
   local_path=${relative_path#output/}
   destination=$output_dir/$local_path
   mkdir -p "$(dirname "$destination")"
-  jq -r '.content | implode' <<<"$artifact" >"$destination"
+  jq -r '.content | if type == "string" then . else implode end' <<<"$artifact" >"$destination"
 done < <(jq -c '.result.collected_files[]?' <<<"$result_line")
 
 exit_code=$(jq -r '.result.exit_code // 1' <<<"$result_line")

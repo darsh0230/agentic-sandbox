@@ -17,7 +17,7 @@ use crate::master::Master;
 use crate::shutdown::{wait_for_force, wait_for_shutdown};
 use crate::types::{AgentRunEvent, AgentRunRequest};
 
-const MAX_API_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_API_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -339,6 +339,8 @@ mod tests {
             );
         }
 
+        // The fixture deliberately allocates the full 32 MiB limit: the test
+        // must exercise the real enforcement boundary, not a cheap stand-in.
         let mut oversized = vec![b' '; MAX_API_REQUEST_BYTES];
         oversized.push(b'\n');
         let error = parse_request_bytes(&oversized).await.unwrap_err();

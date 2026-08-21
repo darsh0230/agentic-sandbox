@@ -33,7 +33,7 @@ HTTP stream lines wrap run events:
 
 ```jsonl
 {"type":"event","event":{"type":"started","run_id":"run-001","slot_id":"slot-0001","pid":123}}
-{"type":"event","event":{"type":"stdout","data":[104,101,108,108,111,10]}}
+{"type":"event","event":{"type":"stdout","data":"hello\n"}}
 {"type":"heartbeat"}
 {"type":"result","result":{"run_id":"run-001","slot_id":"slot-0001","exit_code":0}}
 ```
@@ -43,7 +43,7 @@ documented below.
 
 The HTTP API is a development interface. It has bearer-token authentication but no
 TLS, rate limiting, or authorization scopes. `POST /api/run` requires
-`Content-Type: application/json` and enforces a 2 MiB body limit. Authentication
+`Content-Type: application/json` and enforces a 32 MiB body limit. Authentication
 is checked before the request body is buffered. Keep it on loopback or place it
 behind a trusted authenticated gateway.
 
@@ -71,7 +71,7 @@ wrapped final result or error:
 
 ```jsonl
 {"type":"started","run_id":"run-001","slot_id":"slot-0001","pid":123}
-{"type":"stdout","data":[104,101,108,108,111,10]}
+{"type":"stdout","data":"hello\n"}
 {"type":"result","result":{"run_id":"run-001","slot_id":"slot-0001","exit_code":0}}
 ```
 
@@ -139,16 +139,28 @@ Full example:
 | `result_policy` | no | see below | Selects files and structured JSON to return |
 | `cleanup_policy` | no | `DeleteWorkspaceAfterRun` | Serde enum spelling is case-sensitive |
 
-`injected_files[].content` accepts a JSON byte array. The alias `content_utf8`
-accepts a UTF-8 string and is more convenient for text. File modes are numeric;
-decimal `420` is octal `0644`.
+`injected_files[].content` accepts a UTF-8 string (the compact choice for text)
+or a JSON byte array for binary content; the `content_utf8` alias accepts the
+same UTF-8 string. File modes are numeric; decimal `420` is octal `0644`.
+
+### Byte payload encoding
+
+Byte payloads — `injected_files[].content`, stdout/stderr event `data`,
+`stdout_tail`/`stderr_tail`, and `collected_files[].content` — are encoded as
+raw UTF-8 strings when the bytes are valid UTF-8 and as JSON byte arrays
+otherwise. Requests may send either shape and responses emit whichever fits, so
+clients must always accept both. A streaming stdout chunk that splits a
+multi-byte character is not valid UTF-8 and arrives as an array even when the
+overall stream is text.
 
 Unknown fields in the request and its nested request objects are rejected. This
 prevents misspelled security or timeout settings from being silently ignored.
 
-The browser currently allows selecting up to 24 MiB of files, but the HTTP
-server's JSON body limit is smaller. Treat 2 MiB as the effective total request
-limit until the UI and server limits are aligned.
+Both control APIs cap a run request at 32 MiB. The browser UI additionally
+limits selected files to 24 MiB of raw bytes and validates the encoded request
+body against the server limit before submitting — a selection that is mostly
+binary can still overflow the limit because of the byte-array encoding's
+expansion.
 
 Cleanup policy values:
 
@@ -173,8 +185,8 @@ The result object contains:
 | --- | --- |
 | `run_id`, `slot_id` | Request and allocated slot identifiers |
 | `exit_code`, `signal` | Child termination status |
-| `stdout_tail`, `stderr_tail` | Bounded byte arrays containing the end of each stream |
-| `collected_files` | Requested relative path, bytes, and size |
+| `stdout_tail`, `stderr_tail` | Bounded ends of each stream (see byte payload encoding) |
+| `collected_files` | Requested relative path, content, and size |
 | `result_json` | Parsed result file, or `null` |
 | `workspace_preserved` | Whether cleanup policy retained the slot workspace |
 

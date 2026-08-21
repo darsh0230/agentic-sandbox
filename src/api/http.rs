@@ -27,7 +27,7 @@ use crate::types::{AgentRunEvent, AgentRunRequest};
 const INDEX_HTML: &str = include_str!("../../ui/index.html");
 const APP_CSS: &str = include_str!("../../ui/app.css");
 const APP_JS: &str = include_str!("../../ui/app.js");
-const MAX_HTTP_RUN_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_HTTP_RUN_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 #[derive(Clone)]
 pub struct HttpConfig {
     pub addr: SocketAddr,
@@ -715,6 +715,8 @@ mod tests {
             .unwrap();
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
+        // The fixture deliberately allocates past the full 32 MiB limit: the
+        // test must exercise the real enforcement boundary, not a cheap stand-in.
         let oversized_body = vec![b' '; MAX_HTTP_RUN_REQUEST_BYTES + 1];
         let oversized_unauthorized = app
             .clone()

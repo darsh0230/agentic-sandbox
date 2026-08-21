@@ -44,7 +44,7 @@ pub struct HeaderOverrideRule {
 #[serde(deny_unknown_fields)]
 pub struct InjectedFile {
     pub relative_path: String,
-    #[serde(with = "bytes_as_vec", alias = "content_utf8")]
+    #[serde(with = "bytes_text_or_array", alias = "content_utf8")]
     pub content: Vec<u8>,
     #[serde(default = "default_file_mode")]
     pub mode: u32,
@@ -115,9 +115,11 @@ pub enum AgentRunEvent {
         pid: i32,
     },
     Stdout {
+        #[serde(with = "bytes_text_or_array")]
         data: Vec<u8>,
     },
     Stderr {
+        #[serde(with = "bytes_text_or_array")]
         data: Vec<u8>,
     },
     AgentEvent {
@@ -146,7 +148,9 @@ pub struct AgentRunResult {
     pub slot_id: String,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
+    #[serde(with = "bytes_text_or_array")]
     pub stdout_tail: Vec<u8>,
+    #[serde(with = "bytes_text_or_array")]
     pub stderr_tail: Vec<u8>,
     pub collected_files: Vec<CollectedFile>,
     pub result_json: Option<Value>,
@@ -156,6 +160,7 @@ pub struct AgentRunResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectedFile {
     pub relative_path: String,
+    #[serde(with = "bytes_text_or_array")]
     pub content: Vec<u8>,
     pub size: u64,
 }
@@ -173,14 +178,20 @@ fn default_result_file() -> Option<String> {
     Some("result.json".to_string())
 }
 
-mod bytes_as_vec {
+/// Wire encoding for byte payloads: a raw UTF-8 string when the bytes are
+/// valid UTF-8, otherwise a JSON array of byte values. Deserialization always
+/// accepts either shape so older byte-array clients keep working.
+mod bytes_text_or_array {
     use serde::{Deserializer, Serializer};
 
     pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        serializer.serialize_bytes(bytes)
+        match std::str::from_utf8(bytes) {
+            Ok(text) => serializer.serialize_str(text),
+            Err(_) => serializer.serialize_bytes(bytes),
+        }
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -224,7 +235,10 @@ mod bytes_as_vec {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{AgentRunEvent, AgentRunRequest, CleanupPolicy, InjectedFile, ResultPolicy};
+    use super::{
+        AgentRunEvent, AgentRunRequest, AgentRunResult, CleanupPolicy, CollectedFile, InjectedFile,
+        ResultPolicy,
+    };
 
     #[test]
     fn minimal_request_populates_every_default() {
@@ -423,7 +437,7 @@ mod tests {
             ),
             (
                 AgentRunEvent::Stderr { data: vec![1, 2] },
-                json!({"type":"stderr","data":[1,2]}),
+                json!({"type":"stderr","data":"\u{1}\u{2}"}),
             ),
             (
                 AgentRunEvent::AgentEvent {
@@ -463,6 +477,75 @@ mod tests {
             let decoded: AgentRunEvent = serde_json::from_value(expected.clone()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn byte_payloads_emit_utf8_strings_with_a_byte_array_fallback() {
+        let text_file = InjectedFile {
+            relative_path: "note.txt".into(),
+            content: "héllo\n".as_bytes().to_vec(),
+            mode: 0o644,
+        };
+        assert_eq!(
+            serde_json::to_value(&text_file).unwrap()["content"],
+            json!("héllo\n")
+        );
+        let binary_file = InjectedFile {
+            relative_path: "blob.bin".into(),
+            content: vec![0, 255],
+            mode: 0o644,
+        };
+        assert_eq!(
+            serde_json::to_value(&binary_file).unwrap()["content"],
+            json!([0, 255])
+        );
+
+        assert_eq!(
+            serde_json::to_value(&AgentRunEvent::Stdout {
+                data: b"hello\n".to_vec(),
+            })
+            .unwrap(),
+            json!({"type":"stdout","data":"hello\n"})
+        );
+        // A chunk that splits a multi-byte character is not valid UTF-8 and
+        // keeps the array encoding, so clients must accept both shapes.
+        assert_eq!(
+            serde_json::to_value(&AgentRunEvent::Stderr { data: vec![0xC3] }).unwrap(),
+            json!({"type":"stderr","data":[195]})
+        );
+
+        let result = AgentRunResult {
+            run_id: "r".into(),
+            slot_id: "slot-0001".into(),
+            exit_code: Some(0),
+            signal: None,
+            stdout_tail: b"out\n".to_vec(),
+            stderr_tail: vec![0, 255],
+            collected_files: vec![
+                CollectedFile {
+                    relative_path: "a.txt".into(),
+                    content: b"text".to_vec(),
+                    size: 4,
+                },
+                CollectedFile {
+                    relative_path: "b.bin".into(),
+                    content: vec![0, 255],
+                    size: 2,
+                },
+            ],
+            result_json: None,
+            workspace_preserved: false,
+        };
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["stdout_tail"], json!("out\n"));
+        assert_eq!(wire["stderr_tail"], json!([0, 255]));
+        assert_eq!(wire["collected_files"][0]["content"], json!("text"));
+        assert_eq!(wire["collected_files"][1]["content"], json!([0, 255]));
+
+        // Both wire shapes deserialize through the same visitor.
+        let restored: AgentRunResult = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.stdout_tail, b"out\n");
+        assert_eq!(restored.stderr_tail, vec![0, 255]);
     }
 
     #[test]

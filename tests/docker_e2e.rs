@@ -393,12 +393,12 @@ printf '%s' '{"ok":true,"source":"e2e"}' > result.json"#;
         result["result_json"]
     );
     ensure!(
-        String::from_utf8_lossy(&json_byte_array(&result["stdout_tail"])?)
+        String::from_utf8_lossy(&json_bytes(&result["stdout_tail"])?)
             .contains("stdout:expected:injected-data"),
         "stdout tail did not contain command output"
     );
     ensure!(
-        String::from_utf8_lossy(&json_byte_array(&result["stderr_tail"])?).contains("stderr-line"),
+        String::from_utf8_lossy(&json_bytes(&result["stderr_tail"])?).contains("stderr-line"),
         "stderr tail did not contain command output"
     );
 
@@ -412,7 +412,7 @@ printf '%s' '{"ok":true,"source":"e2e"}' > result.json"#;
         files[0]
     );
     ensure!(
-        json_byte_array(&files[0]["content"])? == b"artifact-data",
+        json_bytes(&files[0]["content"])? == b"artifact-data",
         "unexpected artifact content: {}",
         files[0]
     );
@@ -518,7 +518,7 @@ async fn privileged_isolation_scenario(harness: &DockerHarness) -> Result<()> {
         result["exit_code"] == 0,
         "privileged isolation assertions failed: {result}"
     );
-    let stdout_bytes = json_byte_array(&result["stdout_tail"])?;
+    let stdout_bytes = json_bytes(&result["stdout_tail"])?;
     let stdout = String::from_utf8_lossy(&stdout_bytes);
     for expected in [
         "pwd=/home/agent",
@@ -559,7 +559,7 @@ while :; do :; done"#;
         "slot signal handler readiness marker",
         |value| {
             is_event(value, "stdout")
-                && json_byte_array(&value["event"]["data"]).is_ok_and(|bytes| {
+                && json_bytes(&value["event"]["data"]).is_ok_and(|bytes| {
                     bytes
                         .windows(b"handler-ready".len())
                         .any(|window| window == b"handler-ready")
@@ -1110,7 +1110,7 @@ impl Transcript {
         let mut output = Vec::new();
         for line in &self.lines {
             if is_event(&line.value, event_type) {
-                output.extend(json_byte_array(&line.value["event"]["data"])?);
+                output.extend(json_bytes(&line.value["event"]["data"])?);
             }
         }
         Ok(output)
@@ -1121,10 +1121,15 @@ fn is_event(value: &Value, event_type: &str) -> bool {
     value["type"] == "event" && value["event"]["type"] == event_type
 }
 
-fn json_byte_array(value: &Value) -> Result<Vec<u8>> {
+/// Byte payloads arrive as a UTF-8 string when the bytes are valid UTF-8 and
+/// as a JSON array of byte values otherwise, so both shapes decode here.
+fn json_bytes(value: &Value) -> Result<Vec<u8>> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.as_bytes().to_vec());
+    }
     value
         .as_array()
-        .context("expected a JSON byte array")?
+        .context("expected a UTF-8 string or a JSON byte array")?
         .iter()
         .map(|byte| {
             byte.as_u64()

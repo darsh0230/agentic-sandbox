@@ -6,6 +6,7 @@ const state = {
 };
 
 const maxUploadBytes = 24 * 1024 * 1024;
+const maxRequestBytes = 32 * 1024 * 1024;
 
 const defaults = {
   command: "bash -lc 'pi -p \"$(cat input/task.md)\"'",
@@ -112,13 +113,18 @@ async function runAgent(event) {
 
   try {
     const uploadedFiles = await readInjectedUploads();
+    const body = JSON.stringify(buildRequest(uploadedFiles, true));
+    const bodyBytes = new TextEncoder().encode(body).length;
+    if (bodyBytes > maxRequestBytes) {
+      throw new Error(`Request body is ${formatBytes(bodyBytes)}; the server limit is ${formatBytes(maxRequestBytes)}.`);
+    }
     const response = await fetch("/api/run", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...authHeaders(),
       },
-      body: JSON.stringify(buildRequest(uploadedFiles, true)),
+      body,
     });
     if (!response.ok) throw new Error(await response.text());
     await readNdjson(response.body);
@@ -179,11 +185,21 @@ async function readInjectedUploads() {
     seen.add(upload.relativePath);
     injected.push({
       relative_path: upload.relativePath,
-      content: Array.from(new Uint8Array(await upload.file.arrayBuffer())),
+      content: encodeFileContent(new Uint8Array(await upload.file.arrayBuffer())),
       mode: 420,
     });
   }
   return injected;
+}
+
+// Text files travel as raw UTF-8 strings; only non-UTF-8 bytes keep the far
+// larger JSON byte-array encoding.
+function encodeFileContent(bytes) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return Array.from(bytes);
+  }
 }
 
 async function readNdjson(body) {

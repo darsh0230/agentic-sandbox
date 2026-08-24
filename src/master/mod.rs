@@ -85,6 +85,17 @@ impl Master {
         if isolation_mode == IsolationMode::User {
             validate_user_mode_slots(&planned_slots)?;
         }
+        // Slot UIDs are recycled across restarts: reap leftovers from a
+        // previous master instance that died before its slot cleanup ran. The
+        // sweep blocks briefly per slot; keep it off the runtime.
+        let sweep_uids: Vec<u32> = planned_slots.iter().map(|slot| slot.uid).collect();
+        tokio::task::spawn_blocking(move || {
+            for uid in sweep_uids {
+                crate::sandbox::reaper::reap_uid(uid);
+            }
+        })
+        .await
+        .context("startup slot cleanup sweep failed")?;
         info!(
             %isolation_mode,
             slots = slot_count,
@@ -205,6 +216,15 @@ impl Master {
             }
         };
         let slot_spec = SlotSpec::from(slot_lease.slot());
+        // The teardown sweep after a run is bounded and cannot be transactional:
+        // survivors would share this slot's recycled UID (and its workspace)
+        // with the next tenant. Sweep again before the slot is reused.
+        {
+            let sweep_uid = slot_spec.uid;
+            tokio::task::spawn_blocking(move || crate::sandbox::reaper::reap_uid(sweep_uid))
+                .await
+                .context("slot checkout cleanup sweep failed")?;
+        }
         info!(run_id = %req.run_id, slot = %slot_lease.slot().id, isolation_mode = %self.isolation_mode, "allocated sandbox slot");
 
         // Once a sandbox owns a slot, keep its execution task alive even if the

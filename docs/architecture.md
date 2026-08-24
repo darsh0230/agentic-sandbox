@@ -56,11 +56,16 @@ control plane; see the [security model](security.md) for the consequences.
    vector supplied by the request.
 8. Stdout and stderr are streamed while bounded tail buffers are retained for the
    final result.
-9. A timeout or client disconnect kills the child process group by default. A
-   service SIGINT or SIGTERM is forwarded unchanged to every active child
-   process group and is allowed to complete within the service shutdown grace
-   period.
-10. A child still running at the shutdown deadline is sent SIGKILL.
+9. A timeout or client disconnect kills the child process group and then
+   sweeps every remaining process owned by the slot's dedicated UID
+   (pidfd-pinned SIGKILL, immune to PID reuse), so descendants that detached
+   into their own session (`setsid`/`setpgid` are allowed) cannot outlive
+   their run. The same UID sweep runs again before the slot is leased to the
+   next run. A service SIGINT or SIGTERM is forwarded unchanged to every
+   active child process group and is allowed to complete within the service
+   shutdown grace period.
+10. A child still running at the shutdown deadline is sent SIGKILL, followed by
+    the same UID-scoped sweep.
 11. Declared files and the optional result JSON file are collected.
 12. The workspace is reset unless its cleanup policy preserves it.
 13. The slot lease is returned to the FIFO allocator.

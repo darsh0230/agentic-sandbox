@@ -7,6 +7,21 @@ the project intends to use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Slot agents that isolate spawned commands in their own session or process
+  group (for example the ante agent runtime) can spawn subprocesses again:
+  `setsid` and `setpgid` are no longer denied by the agent seccomp filter.
+
+### Security
+
+- Slot cleanup now SIGKILLs the child process group and then sweeps every
+  remaining process owned by the slot's dedicated UID, which agents cannot
+  change. Sweep signals are pidfd-pinned so PID reuse cannot redirect a kill
+  onto an unrelated process. Slots are swept again before being leased to the
+  next run, and at master startup for stale processes left by a previous
+  instance.
+
 ## [0.2.0] - 2026-08-21
 
 ### Added

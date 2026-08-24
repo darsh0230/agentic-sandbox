@@ -4,6 +4,7 @@ pub mod init;
 pub mod launcher;
 pub mod mounts;
 pub mod namespaces;
+pub mod reaper;
 pub mod rootfs;
 pub mod seccomp;
 

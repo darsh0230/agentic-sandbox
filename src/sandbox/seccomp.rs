@@ -9,8 +9,10 @@ const DENIED_SYSCALLS: &[&str] = &[
     "chroot",
     "setns",
     "unshare",
-    "setsid",
-    "setpgid",
+    // `setsid` and `setpgid` are intentionally allowed: agent runtimes place
+    // each spawned command in its own session/process group. Cleanup cannot
+    // rely on process-group signaling alone; the UID-scoped reaper
+    // (`sandbox::reaper`) covers descendants that detach.
     "ptrace",
     "bpf",
     "perf_event_open",
@@ -61,6 +63,17 @@ mod tests {
     use super::{DENIED_SYSCALLS, build_agent_seccomp_filter};
 
     #[test]
+    fn session_and_process_group_syscalls_stay_allowed_for_agent_runtimes() {
+        // Denying these made agent subprocess spawning fail outright.
+        for syscall in ["setsid", "setpgid"] {
+            assert!(
+                !DENIED_SYSCALLS.contains(&syscall),
+                "{syscall} must stay allowed; cleanup is the UID reaper's job"
+            );
+        }
+    }
+
+    #[test]
     fn denied_syscall_policy_has_no_duplicate_rules() {
         let unique = DENIED_SYSCALLS.iter().copied().collect::<HashSet<_>>();
 
@@ -70,8 +83,7 @@ mod tests {
     #[test]
     fn core_isolation_and_listener_syscalls_resolve_on_linux() {
         for name in [
-            "mount", "umount2", "unshare", "setsid", "setpgid", "ptrace", "bpf", "bind", "listen",
-            "accept",
+            "mount", "umount2", "unshare", "ptrace", "bpf", "bind", "listen", "accept",
         ] {
             assert!(
                 ScmpSyscall::from_name(name).is_ok(),

@@ -73,9 +73,14 @@ Both Linux modes:
 - set `PR_SET_NO_NEW_PRIVS`;
 - install a seccomp filter that denies mount/namespace, tracing, kernel-management,
   inbound-listener, and several other high-risk syscalls;
-- run the child in a new process group, then deny `setsid` and `setpgid`, so
-  timeout, disconnect, normal-exit cleanup, and service shutdown can signal the
-  whole group.
+- run the child in a new process group; on timeout, disconnect, normal-exit
+  cleanup, and forced shutdown, SIGKILL the group first and then every
+  remaining process owned by the slot's dedicated UID (signals are
+  pidfd-pinned, so a recycled PID can never redirect the SIGKILL onto another
+  slot's process). A slot's UID is swept again before its lease is handed to
+  the next run. `setsid` and `setpgid` stay allowed for agent runtimes that
+  isolate spawned commands; the child cannot change UID because
+  `PR_SET_NO_NEW_PRIVS` and the capability drops are already in place.
 
 The trusted control plane requires `CAP_KILL` to signal a slot after that slot
 switches to its dedicated UID. This applies to both isolation modes. The supplied
@@ -92,9 +97,15 @@ Known limitations:
   syscalls remain available.
 - `close_unneeded_fds` is currently a no-op that relies on standard close-on-exec
   behavior.
-- Process-group killing still does not have the containment and accounting
-  guarantees of a cgroup; keep container-level PID limits and monitoring in
-  place.
+- Slot cleanup (process-group kill plus a bounded UID sweep) still does not
+  have the containment and accounting guarantees of a cgroup; keep container-
+  and cgroup-level PID limits (`pids.max`) and monitoring in place. The UID
+  sweep retries briefly to catch processes forked during teardown, but it is
+  not transactional: an agent that keeps forking fast enough can leave a
+  survivor. Because slot UIDs are recycled, such a survivor runs under the
+  next tenant's UID with access to the next tenant's workspace and processes
+  until it exits or the checkout or startup sweep catches it. Deployments
+  where this matters should cap fork rates at the container level.
 - The child can fork and create outbound sockets.
 
 ## Resource limits

@@ -81,6 +81,9 @@ async fn run_scenarios(harness: &DockerHarness) -> Result<()> {
     descendant_cleanup_scenario(harness)
         .await
         .context("process-tree cleanup scenario")?;
+    checkout_sweep_scenario(harness)
+        .await
+        .context("slot checkout UID sweep scenario")?;
     timeout_scenario(harness)
         .await
         .context("timeout and slot-release scenario")?;
@@ -443,7 +446,7 @@ fi
          while test ! -e '{ready}'; do :; done; \
          status=$(cat '{ready}'); \
          rm -f '{ready}'; \
-         case \"$status\" in blocked|escaped) ;; *) exit 92;; esac; \
+         case \"$status\" in escaped) ;; *) printf \"unexpected-descendant-status:%s;\" \"$status\"; exit 92;; esac; \
          printf parent-exited"
     );
     let transcript = run_to_completion(
@@ -489,6 +492,75 @@ fi
         "a background descendant survived its completed run: {}",
         probe.result()?
     );
+    Ok(())
+}
+
+// Plants a detached "previous tenant" process under the slot UID plus a
+// lookalike under a neighboring agent UID: the next run's checkout sweep must
+// reap exactly one of them.
+async fn checkout_sweep_scenario(harness: &DockerHarness) -> Result<()> {
+    let leftover_probe = "^sleep 424242";
+    let neighbor_probe = "^sleep 434343";
+    for (user, marker) in [("agent0001", "sleep 424242"), ("agent0002", "sleep 434343")] {
+        harness.resources.docker_exec(&[
+            "su",
+            "-s",
+            "/bin/sh",
+            user,
+            "-c",
+            &format!("setsid {marker} </dev/null >/dev/null 2>&1 &"),
+        ])?;
+    }
+    let alive = |expected: &str| -> Result<bool> {
+        let script = format!(
+            "found=0; for c in /proc/[0-9]*/cmdline; do \
+             if tr '\\000' ' ' < \"$c\" | grep -q '{expected}'; then found=1; fi; \
+             done; printf $found"
+        );
+        Ok(harness
+            .resources
+            .docker_exec(&["sh", "-c", &script])?
+            .trim()
+            == "1")
+    };
+    ensure!(
+        alive(leftover_probe)? && alive(neighbor_probe)?,
+        "detached fixture processes did not survive docker exec teardown"
+    );
+
+    let transcript = run_to_completion(
+        harness,
+        json!({
+            "run_id": harness.run_id("checkout-sweep"),
+            "command": ["sh", "-c", "printf checkout-run-ok"],
+            "timeout_ms": 10_000,
+            "result_policy": {"collect_paths": [], "result_file": null}
+        }),
+        Duration::from_secs(8),
+    )
+    .await?;
+    ensure!(
+        transcript.result()?["exit_code"] == 0,
+        "checkout sweep run failed: {}",
+        transcript.result()?
+    );
+
+    ensure!(
+        !alive(leftover_probe)?,
+        "a process left behind by the slot's previous tenant survived \
+         the slot checkout UID sweep"
+    );
+    ensure!(
+        alive(neighbor_probe)?,
+        "the slot checkout UID sweep leaked onto a neighboring agent uid"
+    );
+
+    // Best-effort neighbor fixture cleanup.
+    let kill_script = "for c in /proc/[0-9]*/cmdline; do \
+                       if tr '\\000' ' ' < \"$c\" | grep -q '^sleep 434343'; then \
+                       pid=${c#/proc/}; kill -9 \"${pid%/cmdline}\" 2>/dev/null || true; fi; \
+                       done";
+    let _ = harness.resources.docker_exec(&["sh", "-c", kill_script]);
     Ok(())
 }
 
@@ -1436,6 +1508,13 @@ impl DockerResources {
             "Docker did not report a mapped port: {}",
             last_error.unwrap_or_else(|| "no output".to_string())
         )
+    }
+
+    /// Runs a command inside the test container (as root) and returns stdout.
+    fn docker_exec(&self, argv: &[&str]) -> Result<String> {
+        let mut command = Command::new("docker");
+        command.arg("exec").arg(&self.container).args(argv);
+        checked_command(command, DOCKER_COMMAND_TIMEOUT, "docker exec")
     }
 
     fn logs(&self) -> String {

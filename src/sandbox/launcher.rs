@@ -15,6 +15,7 @@ pub struct SandboxChild {
     child: Child,
     output_rx: mpsc::Receiver<OutputChunk>,
     pid: i32,
+    slot_uid: u32,
     process_tree_signaled: bool,
 }
 
@@ -40,6 +41,7 @@ impl SandboxLauncher {
             .join("state")
             .join(format!("{}.setup-error", config.run_id));
         let _ = std::fs::remove_file(&setup_error_path);
+        let slot_uid = config.slot.uid;
         configure_platform(&mut command, config, setup_error_path.clone())?;
         let mut child = command.spawn().map_err(|err| {
             if let Ok(details) = std::fs::read_to_string(&setup_error_path) {
@@ -65,6 +67,7 @@ impl SandboxLauncher {
             child,
             output_rx,
             pid,
+            slot_uid,
             process_tree_signaled: false,
         })
     }
@@ -88,8 +91,12 @@ impl SandboxChild {
     }
 
     pub async fn kill(&mut self) -> Result<()> {
+        let signaled_now = !self.process_tree_signaled;
         let process_group_result = self.signal_kill();
         self.child.kill().await.ok();
+        if signaled_now {
+            reap_slot_processes(self.slot_uid).await;
+        }
         process_group_result
     }
 
@@ -149,8 +156,23 @@ impl Drop for SandboxChild {
     fn drop(&mut self) {
         // A canceled or panicking execution task must not leave a process using
         // a slot that is about to be returned to the allocator.
+        let signaled_now = !self.process_tree_signaled;
         self.signal_kill().ok();
+        if signaled_now {
+            // Drop is synchronous and may run during runtime teardown, where no
+            // executor can be relied upon: put the UID sweep on a detached OS
+            // thread instead of blocking this one.
+            let uid = self.slot_uid;
+            std::thread::spawn(move || crate::sandbox::reaper::reap_uid(uid));
+        }
     }
+}
+
+// Backstop for the process-group signal: detached descendants are reaped by
+// slot UID (see `sandbox::reaper`). The sweep blocks briefly, so it always
+// runs off the async runtime.
+async fn reap_slot_processes(uid: u32) {
+    let _ = tokio::task::spawn_blocking(move || crate::sandbox::reaper::reap_uid(uid)).await;
 }
 
 fn spawn_reader<R>(mut reader: R, stream: OutputStream, tx: mpsc::Sender<OutputChunk>)
@@ -322,6 +344,9 @@ mod tests {
             child,
             output_rx,
             pid,
+            // UID 0 makes `reaper::reap_uid` a no-op, so test cleanup relies
+            // on the process-group signal alone.
+            slot_uid: 0,
             process_tree_signaled: false,
         }
     }
@@ -384,6 +409,23 @@ mod tests {
         child.process_tree_signaled = true;
         assert_eq!(exit.code, Some(71));
         assert_eq!(exit.signal, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repeated_kill_is_prompt_and_idempotent() {
+        let mut child =
+            stopped_process_group("trap '' TERM; kill -STOP $$; while :; do sleep 1; done");
+        child.kill().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+            .await
+            .expect("SIGKILL did not reap the child")
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        child.kill().await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        child.process_tree_signaled = true;
     }
 
     #[cfg(unix)]

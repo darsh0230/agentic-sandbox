@@ -30,10 +30,6 @@ const DENIED_SYSCALLS: &[&str] = &[
     "fanotify_init",
     "quotactl",
     "acct",
-    "bind",
-    "listen",
-    "accept",
-    "accept4",
 ];
 
 #[cfg(target_os = "linux")]

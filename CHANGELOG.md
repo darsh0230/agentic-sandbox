@@ -7,20 +7,29 @@ the project intends to use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-
-- Slot agents that isolate spawned commands in their own session or process
-  group (for example the ante agent runtime) can spawn subprocesses again:
-  `setsid` and `setpgid` are no longer denied by the agent seccomp filter.
-
 ### Security
 
+- Hardened the runtime image against scan findings (STRYKEA ECR-2026-12):
+  apply all published Debian bookworm security updates at build time
+  (`apt-get upgrade`), upgrade npm to 12.2.1 (fixes bundled `tar` and `pacote`
+  CVEs) and swap its bundled `undici` (6.29.0 → 6.29.1) and `ip-address`
+  (10.7.2 → 10.7.4), pin `@earendil-works/pi-coding-agent` (1.4.0) and
+  `opencode-ai` (1.19.5), override `pi-coding-agent`'s pinned `undici`
+  (→ 8.12.3) and bundled `@vitest/mocker` (→ 4.1.12) with patched releases,
+  and pin pip packages with fixed releases (`certifi>=2026.10.18`,
+  `urllib3>=2.8.0`, `requests==2.34.2`).
 - Slot cleanup now SIGKILLs the child process group and then sweeps every
   remaining process owned by the slot's dedicated UID, which agents cannot
   change. Sweep signals are pidfd-pinned so PID reuse cannot redirect a kill
   onto an unrelated process. Slots are swept again before being leased to the
   next run, and at master startup for stale processes left by a previous
   instance.
+
+### Fixed
+
+- Slot agents that isolate spawned commands in their own session or process
+  group (for example the ante agent runtime) can spawn subprocesses again:
+  `setsid` and `setpgid` are no longer denied by the agent seccomp filter.
 
 ## [0.2.0] - 2026-08-21
 

@@ -208,13 +208,15 @@ allowed; a missing explicitly supplied file is an error.
 
 The runtime image installs:
 
-- `@earendil-works/pi-coding-agent`
-- `opencode-ai`
+- `@earendil-works/pi-coding-agent` (pinned via `PI_CODING_AGENT_VERSION`)
+- `opencode-ai` (pinned via `OPENCODE_VERSION`)
 
-The current Dockerfile does not pin their versions. Pin external tool versions and
-base-image digests before producing reproducible or security-sensitive releases.
-Agentic Sandbox executes the request's argv and does not require either tool; a
-plain shell command is sufficient for smoke testing.
+Tool and npm versions are pinned in the Dockerfile, and vulnerable transitive
+dependencies are overridden with patched releases; bump the corresponding
+`ARG` values to update. Base-image digests are still unpinned; pin them before
+producing reproducible or security-sensitive releases. Agentic Sandbox
+executes the request's argv and does not require either tool; a plain shell
+command is sufficient for smoke testing.
 
 Non-interactive agent commands currently use these forms:
 
